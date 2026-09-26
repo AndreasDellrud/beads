@@ -4,6 +4,7 @@ go_library(
     name = "externaldeps",
     srcs = [
         "decorator.go",
+        "policy_roles.go",
         "resolver.go",
         "role_accessors.go",
         "uow_decorator.go",
@@ -18,7 +19,6 @@ go_library(
         "//internal/types",
         "//internal/workapi",
         "//internal/workapi/storereader",
-        "//internal/workapi/storereadycounter",
         "//issueops",
         "//memoryops",
     ],
@@ -28,8 +28,11 @@ go_test(
     name = "externaldeps_test",
     srcs = [
         "decorator_test.go",
+        "fake_roles_test.go",
+        "policy_roles_test.go",
         "ready_wake_test.go",
         "uow_decorator_test.go",
+        "uow_policy_roles_test.go",
     ],
     embed = [":externaldeps"],
     deps = [
@@ -38,6 +41,9 @@ go_test(
         "//internal/storage/issueops",
         "//internal/storage/uow",
         "//internal/types",
+        "//internal/workapi",
+        "//internal/workapi/storereader",
+        "//internal/workapi/storereadycounter",
         "//issueops",
     ],
 )

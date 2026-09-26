@@ -111,6 +111,17 @@ type ReadyRequest struct {
 	// the row carries types.Issue.IsLitePartial. See ListRequest.Brief, which
 	// is the same knob on the other operation and carries the full contract.
 	Brief bool
+
+	// ExcludeIDs removes these ids from the ready set before selection,
+	// paging and counting, on every implementation, so a listing, its count
+	// and a claim over the same request all see the same smaller set.
+	//
+	// It is how a workspace policy layered ABOVE a backend's roles narrows
+	// ready work — the external-capability policy puts every issue with an
+	// unsatisfied `external:` blocker here and delegates to the backend's own
+	// role — rather than a user-facing filter. Front doors do not set it; an
+	// id that names nothing is simply never matched.
+	ExcludeIDs []string
 }
 
 // ListRequest describes one issue-list query.

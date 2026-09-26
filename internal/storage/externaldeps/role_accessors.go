@@ -5,17 +5,44 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/internal/workapi/storereader"
 	"github.com/steveyegge/beads/issueops"
 )
 
-// IssueReader builds the read role on the policy store. In particular, Ready
-// and List(ReadyFlag) must call this store's filtered ready methods rather than
-// promoted methods on the undecorated store.
-func (s *Store) IssueReader() (issueops.Reader, error) { return storereader.New(s) }
+// IssueReader narrows Ready through the shared role wrapper and hands the
+// request to the INNER store's own reader, so the backend's reader (and the
+// telemetry layer beneath this one) answers it with ExcludeIDs set. List and
+// Get stay on a reader built over this decorator: List(ReadyFlag) still runs
+// the store-level GetReadyWorkWithCounts override until it moves to a role.
+func (s *Store) IssueReader() (issueops.Reader, error) {
+	rest, err := storereader.New(s)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := s.inner.IssueReader()
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyReader(rest, inner, s.readyPolicy()), nil
+}
+
+// ReadyCounter narrows the count exactly as IssueReader narrows Ready, and
+// delegates to the inner store's counter — so the documented
+// storage.ReadyCounter.CountReady span still comes from the telemetry layer's
+// own accessor rather than being grafted on here.
+func (s *Store) ReadyCounter() (issueops.ReadyCounter, error) {
+	inner, err := s.inner.ReadyCounter()
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyReadyCounter(inner, s.readyPolicy()), nil
+}
+
+// readyPolicy reads this store's edges from beneath every decorator, the same
+// source the store-level overrides use.
+func (s *Store) readyPolicy() readyPolicy {
+	return readyPolicy{policy: s.Policy, edges: s.edgeSource()}
+}
 
 // IssueClaimer rejects a direct claim of externally blocked work before the
 // backend's atomic claim operation. ReadyClaimer below handles selection among
@@ -44,39 +71,16 @@ func (c *issueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (is
 	return c.inner.Claim(ctx, req)
 }
 
-// ReadyClaimer keeps external blockers out of the ready-claim selection used
-// by HTTP serving. The local compare-and-swap remains inside ClaimReadyIssue.
+// ReadyClaimer narrows the claim's filter and delegates to the inner store's
+// own atomic ClaimNext, which wakes expired defers, selects, claims and
+// hydrates in one transaction. Cross-project state cannot be atomic with the
+// local claim, but local claim ownership remains race-safe.
 func (s *Store) ReadyClaimer() (issueops.ReadyClaimer, error) {
-	return &readyClaimer{policy: s}, nil
-}
-
-type readyClaimer struct{ policy *Store }
-
-func (c *readyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
-	if err := storageissueops.ValidateClaimNextRequest(req); err != nil {
-		return issueops.ClaimNextResult{}, err
-	}
-	filter, err := workapi.BuildReadyFilter(req.Filter)
+	inner, err := s.inner.ReadyClaimer()
 	if err != nil {
-		return issueops.ClaimNextResult{}, err
+		return nil, err
 	}
-	// ClaimReadyIssue does not perform the lazy wake owned by backend ready
-	// roles. Preserve it before selection, including through telemetry/hooks.
-	if waker, ok := storage.UnwrapStore(c.policy.inner).(storage.ExpiredDeferWaker); ok {
-		waker.WakeExpiredDefersAdvisory(ctx)
-	}
-	claimed, err := c.policy.ClaimReadyIssue(ctx, filter, req.Actor)
-	if err != nil || claimed == nil {
-		return issueops.ClaimNextResult{}, err
-	}
-	rows, err := c.policy.SearchIssuesWithCounts(ctx, "", types.IssueFilter{IDs: []string{claimed.ID}})
-	if err != nil {
-		return issueops.ClaimNextResult{}, err
-	}
-	if len(rows) != 1 {
-		return issueops.ClaimNextResult{}, fmt.Errorf("claim ready: hydrate %s: expected one row, got %d", claimed.ID, len(rows))
-	}
-	return issueops.ClaimNextResult{Claimed: rows[0]}, nil
+	return newPolicyReadyClaimer(inner, s.readyPolicy()), nil
 }
 
 // BlockingAnnotator augments the backend's derived local answer with the
@@ -140,7 +144,6 @@ func (t *treeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRequest)
 
 var (
 	_ issueops.Claimer           = (*issueClaimer)(nil)
-	_ issueops.ReadyClaimer      = (*readyClaimer)(nil)
 	_ issueops.BlockingAnnotator = (*blockingAnnotator)(nil)
 	_ issueops.TreeWalker        = (*treeWalker)(nil)
 )

@@ -26,6 +26,9 @@ type fakeStore struct {
 	blockerIDs []string
 	closed     []string
 	lifecycle  publicops.Lifecycle
+	// edgeReads counts every whole-workspace edge read the policy makes,
+	// through either the narrow query or the compatibility fallback.
+	edgeReads int
 }
 
 func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
@@ -115,10 +118,12 @@ func (f *fakeStore) CloseIssueChecked(ctx context.Context, id, _ string, _ stora
 }
 
 func (f *fakeStore) GetAllDependencyRecords(_ context.Context) (map[string][]*types.Dependency, error) {
+	f.edgeReads++
 	return f.deps, nil
 }
 
 func (f *fakeStore) GetExternalBlockingDependencyRecords(_ context.Context) (map[string][]*types.Dependency, error) {
+	f.edgeReads++
 	return f.deps, nil
 }
 

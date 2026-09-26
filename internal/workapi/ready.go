@@ -2,6 +2,7 @@ package workapi
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -65,6 +66,9 @@ func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 		ExcludeTypes:     normalizeExcludeTypes(in.ExcludeTypes),
 		HasMetadataKey:   in.HasMetadataKey,
 		Lite:             in.Brief,
+		// Cloned so a filter a seam later appends to cannot write through
+		// into the caller's request (roles snapshot their requests).
+		ExcludeIDs: slices.Clone(in.ExcludeIDs),
 	}
 
 	if in.Priority != nil {

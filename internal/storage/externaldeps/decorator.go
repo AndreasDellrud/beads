@@ -11,14 +11,23 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/workapi/storereadycounter"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // Store decorates a local store with query-time external capability handling.
 type Store struct {
 	storage.DoltStorage
-	inner         storage.DoltStorage
+	*Policy
+	inner storage.DoltStorage
+}
+
+// Policy is the one definition of which issues external capability blockers
+// hold back. It resolves `external:<project>:<capability>` edges against the
+// configured foreign projects and knows nothing about where those edges were
+// read from: the store decorator and the unit-of-work decorator each hand it
+// an EdgeSource over their own seam, and every ready, count, claim and close
+// guard in this package derives its answer from Exclusions.
+type Policy struct {
 	locateProject ProjectLocator
 	openProject   StoreOpener
 	warnProject   func(ProjectName)
@@ -26,16 +35,68 @@ type Store struct {
 	warned        map[ProjectName]struct{}
 }
 
-// New constructs an external-capability-aware storage decorator.
-func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener) *Store {
-	return &Store{
-		DoltStorage:   inner,
-		inner:         inner,
+// EdgeSource reads the explicit external blocking edges of one workspace,
+// keyed by source issue id: a store's GetExternalBlockingDependencyRecords,
+// or a read-only unit of work's DependencyUseCase one.
+type EdgeSource func(context.Context) (map[string][]*types.Dependency, error)
+
+// NewPolicy constructs the resolving half of the external capability policy.
+func NewPolicy(locateProject ProjectLocator, openProject StoreOpener) *Policy {
+	return &Policy{
 		locateProject: locateProject,
 		openProject:   openProject,
 		warnProject:   defaultProjectWarning,
 		warned:        make(map[ProjectName]struct{}),
 	}
+}
+
+// New constructs an external-capability-aware storage decorator.
+func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener) *Store {
+	return &Store{
+		DoltStorage: inner,
+		Policy:      NewPolicy(locateProject, openProject),
+		inner:       inner,
+	}
+}
+
+// Exclusions reads the workspace's external blocking edges from edges once
+// and returns every source issue that still has an unsatisfied one, mapped to
+// those refs. Malformed refs, unconfigured projects and foreign read failures
+// all count as unsatisfied: the policy fails closed.
+//
+// The ids are what a ready role puts in ReadyRequest.ExcludeIDs, and a
+// source's refs are what a close or claim guard reports in ErrCloseBlocked.
+func (p *Policy) Exclusions(ctx context.Context, edges EdgeSource) (map[string][]string, error) {
+	state, err := p.exclusionState(ctx, edges)
+	if err != nil {
+		return nil, err
+	}
+	return state.refsByIssue, nil
+}
+
+func (p *Policy) exclusionState(ctx context.Context, edges EdgeSource) (blockingState, error) {
+	allDeps, err := edges(ctx)
+	if err != nil {
+		return blockingState{}, fmt.Errorf("external dependencies: list blocking records: %w", err)
+	}
+	return p.blockingStateFromRecords(ctx, allDeps)
+}
+
+// Wrap installs the external-capability policy on store unless the store's
+// server already enforces it. It is the one composition entry point every
+// storage chain should use: a store whose innermost layer implements
+// storage.ServerEnforcedPolicy and answers true is returned unchanged, so the
+// request is forwarded and the server applies the policy once. Every other
+// store — including backends this package has never heard of — is wrapped,
+// so an unrecognized store fails closed rather than silently unpoliced.
+func Wrap(store storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener) storage.DoltStorage {
+	if store == nil {
+		return nil
+	}
+	if remote, ok := storage.UnwrapStore(store).(storage.ServerEnforcedPolicy); ok && remote.PolicyEnforcedByServer() {
+		return store
+	}
+	return New(store, locateProject, openProject)
 }
 
 // Unwrap exposes the decorated store to storage.UnwrapStore.
@@ -97,15 +158,15 @@ func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) e
 	return nil
 }
 
-func (s *Store) warnUnresolvedProject(project ProjectName) {
-	s.warnMu.Lock()
-	defer s.warnMu.Unlock()
-	if _, warned := s.warned[project]; warned {
+func (p *Policy) warnUnresolvedProject(project ProjectName) {
+	p.warnMu.Lock()
+	defer p.warnMu.Unlock()
+	if _, warned := p.warned[project]; warned {
 		return
 	}
-	s.warned[project] = struct{}{}
-	if s.warnProject != nil {
-		s.warnProject(project)
+	p.warned[project] = struct{}{}
+	if p.warnProject != nil {
+		p.warnProject(project)
 	}
 }
 
@@ -114,24 +175,22 @@ type blockingState struct {
 }
 
 func (s *Store) loadBlockingState(ctx context.Context) (blockingState, error) {
-	queryStore, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore)
-	var allDeps map[string][]*types.Dependency
-	var err error
-	if ok {
-		allDeps, err = queryStore.GetExternalBlockingDependencyRecords(ctx)
-	} else {
-		// Compatibility fallback for third-party stores that predate the narrow
-		// optional capability. First-party stores implement the indexed query.
-		allDeps, err = s.inner.GetAllDependencyRecords(ctx)
-	}
-	if err != nil {
-		return blockingState{}, fmt.Errorf("external dependencies: list blocking records: %w", err)
-	}
-
-	return s.blockingStateFromRecords(ctx, allDeps)
+	return s.exclusionState(ctx, s.edgeSource())
 }
 
-func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string][]*types.Dependency) (blockingState, error) {
+// edgeSource is where this store's external blocking edges are read from. The
+// narrow query is taken from beneath every decorator, so it is not spanned or
+// hooked; that is unchanged from before the policy moved to Exclusions.
+func (s *Store) edgeSource() EdgeSource {
+	if queryStore, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore); ok {
+		return queryStore.GetExternalBlockingDependencyRecords
+	}
+	// Compatibility fallback for third-party stores that predate the narrow
+	// optional capability. First-party stores implement the indexed query.
+	return s.inner.GetAllDependencyRecords
+}
+
+func (p *Policy) blockingStateFromRecords(ctx context.Context, allDeps map[string][]*types.Dependency) (blockingState, error) {
 	refs := make([]reference, 0)
 	refsByIssue := make(map[string][]string)
 	for issueID, deps := range allDeps {
@@ -144,7 +203,7 @@ func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string
 		}
 	}
 
-	satisfied, err := s.resolveReferences(ctx, refs)
+	satisfied, err := p.resolveReferences(ctx, refs)
 	if err != nil {
 		return blockingState{}, fmt.Errorf("external dependencies: resolve blockers: %w", err)
 	}
@@ -199,16 +258,24 @@ func (s *Store) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types
 }
 
 func withExternalExclusions(filter types.WorkFilter, refsByIssue map[string][]string) types.WorkFilter {
-	filter.ExcludeIDs = slices.Clone(filter.ExcludeIDs)
+	filter.ExcludeIDs = unionExcludedIDs(filter.ExcludeIDs, refsByIssue)
+	return filter
+}
+
+// unionExcludedIDs is the one merge rule for exclusions, shared by the
+// store-level filter overrides and the role wrappers: the caller's ids first,
+// in their order, then every newly excluded source in sorted order. It always
+// returns a fresh slice, so the caller's is never written through.
+func unionExcludedIDs(existing []string, refsByIssue map[string][]string) []string {
+	out := slices.Clone(existing)
 	newIDs := make([]string, 0, len(refsByIssue))
 	for issueID := range refsByIssue {
-		if !slices.Contains(filter.ExcludeIDs, issueID) {
+		if !slices.Contains(out, issueID) {
 			newIDs = append(newIDs, issueID)
 		}
 	}
 	sort.Strings(newIDs)
-	filter.ExcludeIDs = append(filter.ExcludeIDs, newIDs...)
-	return filter
+	return append(out, newIDs...)
 }
 
 // CountReadyWork reports the externally filtered ready count.
@@ -228,39 +295,6 @@ func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (in
 		return 0, err
 	}
 	return len(issues), nil
-}
-
-// ReadyCounter sizes the ready set through CountReadyWork above, so the total
-// text-mode `bd ready` prints honors the same external exclusions as the page
-// and as the in-band total `bd ready --json` takes from
-// GetReadyWorkWithCountsAndTotal. It must be overridden here: the embedded
-// passthrough would hand back the inner store's counter, which counts
-// externally blocked issues as ready.
-//
-// Overriding costs the layers beneath their turn, though, and this accessor
-// cannot simply recurse the way IssueLifecycle above does: the exclusions live
-// on THIS store, so the counter has to be built over it. The inner store gets
-// its layer back by wrapping the finished counter — which is what
-// telemetry.InstrumentedStorage.WrapReadyCounter exists for, and why the
-// documented storage.ReadyCounter.CountReady span still appears for text-mode
-// `bd ready` in the cmd/bd chain (hooks -> externaldeps -> telemetry -> store).
-func (s *Store) ReadyCounter() (publicops.ReadyCounter, error) {
-	counter, err := storereadycounter.New(s)
-	if err != nil {
-		return nil, err
-	}
-	if wrapper, ok := s.inner.(readyCounterWrapper); ok {
-		return wrapper.WrapReadyCounter(counter), nil
-	}
-	return counter, nil
-}
-
-// readyCounterWrapper is how a decorator beneath this one adds its layer to a
-// ready counter it did not construct. The shape is asserted rather than
-// imported so this package stays independent of which layers are wired below
-// it — telemetry's wrapper is absent entirely when telemetry is disabled.
-type readyCounterWrapper interface {
-	WrapReadyCounter(publicops.ReadyCounter) publicops.ReadyCounter
 }
 
 // ClaimReadyIssue resolves external blockers before using the existing local
@@ -499,7 +533,7 @@ func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth 
 	return s.appendTreeExternalReferences(ctx, tree, deps, maxDepth, showAllPaths)
 }
 
-func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int, showAllPaths bool) ([]*types.TreeNode, error) {
+func (p *Policy) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int, showAllPaths bool) ([]*types.TreeNode, error) {
 	refs := make([]reference, 0)
 	for _, issueDeps := range deps {
 		for _, dep := range issueDeps {
@@ -508,7 +542,7 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 			}
 		}
 	}
-	satisfied, err := s.resolveReferences(ctx, refs)
+	satisfied, err := p.resolveReferences(ctx, refs)
 	if err != nil {
 		return nil, err
 	}

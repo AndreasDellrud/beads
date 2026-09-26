@@ -21,12 +21,12 @@ func WrapUOWProvider(inner uow.UnitOfWorkProvider, locate ProjectLocator, open S
 	if inner == nil {
 		return nil
 	}
-	return &uowProvider{UnitOfWorkProvider: inner, policy: New(nil, locate, open)}
+	return &uowProvider{UnitOfWorkProvider: inner, policy: NewPolicy(locate, open)}
 }
 
 type uowProvider struct {
 	uow.UnitOfWorkProvider
-	policy *Store
+	policy *Policy
 }
 
 var _ uow.UnitOfWorkProvider = (*uowProvider)(nil)
@@ -61,7 +61,24 @@ func (p *uowProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
 // to the inner provider would silently discard external-dependency policy for
 // every command that reaches the proxied seam through an optional source.
 func (p *uowProvider) IssueLifecycle() (publicops.Lifecycle, error) { return uow.NewIssueOperations(p) }
-func (p *uowProvider) IssueReader() (publicops.Reader, error)       { return uow.NewIssueReader(p) }
+
+// IssueReader, ReadyCounter and ReadyClaimer use the SAME role wrappers as the
+// store decorator (policy_roles.go): the exclusions are read once, in a
+// read-only unit of work of the undecorated provider, and the request is
+// delegated to a role over that undecorated provider. A role built over this
+// wrapper instead would apply the policy a second time through the use-case
+// overrides below, which remain for raw-UOW callers and List(ReadyFlag).
+func (p *uowProvider) IssueReader() (publicops.Reader, error) {
+	rest, err := uow.NewIssueReader(p)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := uow.NewIssueReader(p.UnitOfWorkProvider)
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyReader(rest, inner, p.readyPolicy()), nil
+}
 func (p *uowProvider) IssueClaimer() (publicops.Claimer, error)     { return uow.NewIssueClaimer(p) }
 func (p *uowProvider) IssueRelations() (publicops.Relations, error) { return uow.NewIssueRelations(p) }
 func (p *uowProvider) EdgeReader() (publicops.EdgeReader, error)    { return uow.NewEdgeReader(p) }
@@ -74,10 +91,30 @@ func (p *uowProvider) GraphCounter() (publicops.GraphCounter, error) {
 }
 func (p *uowProvider) Counter() (publicops.Counter, error) { return uow.NewCounter(p) }
 func (p *uowProvider) ReadyCounter() (publicops.ReadyCounter, error) {
-	return uow.NewReadyCounter(p)
+	inner, err := uow.NewReadyCounter(p.UnitOfWorkProvider)
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyReadyCounter(inner, p.readyPolicy()), nil
 }
 func (p *uowProvider) ReadyClaimer() (publicops.ReadyClaimer, error) {
-	return uow.NewReadyClaimer(p)
+	inner, err := uow.NewReadyClaimer(p.UnitOfWorkProvider)
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyReadyClaimer(inner, p.readyPolicy()), nil
+}
+
+// readyPolicy reads the edges in a read-only unit of work of the undecorated
+// provider, one per call.
+func (p *uowProvider) readyPolicy() readyPolicy {
+	return readyPolicy{policy: p.policy, edges: p.externalEdges}
+}
+
+func (p *uowProvider) externalEdges(ctx context.Context) (map[string][]*types.Dependency, error) {
+	return uow.RunTxRead(ctx, p.UnitOfWorkProvider, func(ctx context.Context, uw uow.UnitOfWork) (map[string][]*types.Dependency, error) {
+		return uw.DependencyUseCase().GetExternalBlockingDependencyRecords(ctx)
+	})
 }
 func (p *uowProvider) Querier() (publicops.Querier, error) { return uow.NewQuerier(p) }
 func (p *uowProvider) StatsReporter() (publicops.StatsReporter, error) {
@@ -197,7 +234,7 @@ var (
 
 type unitOfWork struct {
 	uow.UnitOfWork
-	policy *Store
+	policy *Policy
 	issue  domain.IssueUseCase
 	deps   domain.DependencyUseCase
 }
@@ -233,21 +270,20 @@ func (u *unitOfWork) DependencyUseCase() domain.DependencyUseCase {
 type issueUseCase struct {
 	domain.IssueUseCase
 	deps   domain.DependencyUseCase
-	policy *Store
+	policy *Policy
 }
 
+// blockingState reads the edges in THIS unit of work, so raw-UOW callers (the
+// proxied `bd ready` / `bd list --ready` paths that consume a filter rather
+// than a role) see the policy inside their own transaction.
 func (u *issueUseCase) blockingState(ctx context.Context) (blockingState, error) {
-	deps, err := u.deps.GetExternalBlockingDependencyRecords(ctx)
-	if err != nil {
-		return blockingState{}, err
-	}
-	return u.policy.blockingStateFromRecords(ctx, deps)
+	return u.policy.exclusionState(ctx, u.deps.GetExternalBlockingDependencyRecords)
 }
 
 func (u *issueUseCase) GetReadyWork(ctx context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
 	state, err := u.blockingState(ctx)
 	if err != nil {
-		return domain.SearchPage{}, fmt.Errorf("external dependencies: %w", err)
+		return domain.SearchPage{}, err
 	}
 	return u.IssueUseCase.GetReadyWork(ctx, withExternalExclusions(filter, state.refsByIssue))
 }
@@ -255,7 +291,7 @@ func (u *issueUseCase) GetReadyWork(ctx context.Context, filter types.WorkFilter
 func (u *issueUseCase) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (domain.SearchCountsPage, error) {
 	state, err := u.blockingState(ctx)
 	if err != nil {
-		return domain.SearchCountsPage{}, fmt.Errorf("external dependencies: %w", err)
+		return domain.SearchCountsPage{}, err
 	}
 	return u.IssueUseCase.GetReadyWorkWithCounts(ctx, withExternalExclusions(filter, state.refsByIssue))
 }
@@ -263,7 +299,7 @@ func (u *issueUseCase) GetReadyWorkWithCounts(ctx context.Context, filter types.
 func (u *issueUseCase) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (domain.ClaimReadyResult, error) {
 	state, err := u.blockingState(ctx)
 	if err != nil {
-		return domain.ClaimReadyResult{}, fmt.Errorf("external dependencies: %w", err)
+		return domain.ClaimReadyResult{}, err
 	}
 	return u.IssueUseCase.ClaimReadyIssue(ctx, withExternalExclusions(filter, state.refsByIssue), actor)
 }
@@ -275,7 +311,7 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 	}
 	state, err := u.blockingState(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("external dependencies: %w", err)
+		return nil, err
 	}
 
 	result := make([]*types.BlockedIssue, 0, len(base)+len(state.refsByIssue))
@@ -376,7 +412,7 @@ func (u *issueUseCase) guardExternalClose(ctx context.Context, id string, force 
 	}
 	state, err := u.blockingState(ctx)
 	if err != nil {
-		return fmt.Errorf("external dependencies: %w", err)
+		return err
 	}
 	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
 		return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
@@ -386,7 +422,7 @@ func (u *issueUseCase) guardExternalClose(ctx context.Context, id string, force 
 
 type dependencyUseCase struct {
 	domain.DependencyUseCase
-	policy *Store
+	policy *Policy
 }
 
 func (u *dependencyUseCase) GetDependencyTree(ctx context.Context, rootID string, opts domain.DepTreeOpts) ([]*types.TreeNode, error) {

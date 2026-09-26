@@ -78,6 +78,7 @@ var roleContractCases = []roleContract{
 		RunBatchCloserAllRefusedBatchRecordsNoHistory,
 		RunBatchCloserDoesNotMutateTheCallerRequest,
 		RunBatchCloserSettlesTheDependersOfWhatItClosed,
+		RunBatchCloserClaimNextHonorsExcludeIDs,
 	),
 
 	roleCases("BatchCreator", "BatchCreator()", oncePerRole,
@@ -577,6 +578,7 @@ var roleContractCases = []roleContract{
 		RunReadyClaimerDoesNotMutateTheCallerRequest,
 		RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven,
 		RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities,
+		RunReadyClaimerHonorsExcludeIDs,
 	),
 
 	roleCases("ReadyCounter", "ReadyCounter() and IssueReader()", oncePerRole,
@@ -589,6 +591,7 @@ var roleContractCases = []roleContract{
 		RunReadyCounterWritesNothing,
 		RunReadyCounterDoesNotMutateTheCallerRequest,
 		RunReadyCounterCountsOnlyTheOpenRowsItsListingLists,
+		RunReadyCounterHonorsExcludeIDs,
 	),
 
 	roleCases("Relations", "IssueRelations()", oncePerRole,

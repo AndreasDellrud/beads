@@ -921,6 +921,22 @@ type ExternalDependencyQueryStore interface {
 	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 }
 
+// ServerEnforcedPolicy marks a store that is a client of a bd server which
+// applies workspace policy — the external-capability ready/claim/close policy
+// among it — on the server side. A client composing its storage chain must
+// not layer that policy again over such a store: the request is forwarded and
+// the server answers it with the policy already applied, while a client-side
+// copy would need dependency records a remote client cannot (and should not)
+// read.
+//
+// The check is made on storage.UnwrapStore(store), so decorators such as
+// hooks and telemetry between the caller and the client do not hide it. A
+// store that does not implement this interface, or answers false, is treated
+// as local and gets the client-side policy — composition fails closed.
+type ServerEnforcedPolicy interface {
+	PolicyEnforcedByServer() bool
+}
+
 // Transaction provides atomic multi-operation support within a single database transaction.
 //
 // The Transaction interface exposes a subset of storage methods that execute within
