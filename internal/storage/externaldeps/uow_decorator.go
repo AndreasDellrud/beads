@@ -79,7 +79,19 @@ func (p *uowProvider) IssueReader() (publicops.Reader, error) {
 	}
 	return newPolicyReader(rest, inner, p.readyPolicy()), nil
 }
-func (p *uowProvider) IssueClaimer() (publicops.Claimer, error)     { return uow.NewIssueClaimer(p) }
+
+// IssueClaimer refuses a claim-by-id of externally blocked work, which the
+// store decorator's claimer has always done: the use-case overrides below do
+// not cover ClaimIssue, so without this the proxied `bd update --claim` and
+// serve's provider arm claimed it. The claim itself stays on a role over this
+// wrapper, so its hooks and transaction are unchanged.
+func (p *uowProvider) IssueClaimer() (publicops.Claimer, error) {
+	inner, err := uow.NewIssueClaimer(p)
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyIssueClaimer(inner, p.readyPolicy()), nil
+}
 func (p *uowProvider) IssueRelations() (publicops.Relations, error) { return uow.NewIssueRelations(p) }
 func (p *uowProvider) EdgeReader() (publicops.EdgeReader, error)    { return uow.NewEdgeReader(p) }
 func (p *uowProvider) BlockingAnnotator() (publicops.BlockingAnnotator, error) {

@@ -71,6 +71,19 @@ func (c *issueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (is
 	return c.inner.Claim(ctx, req)
 }
 
+// BatchCloser guards every item against unsatisfied external blockers and
+// narrows the claim the batch earns, then delegates to the inner store's own
+// closer. Without it the accessor promoted straight to the inner closer, so
+// the direct `bd close` route and serve's store arm closed externally blocked
+// issues without --force and could claim one with --claim-next.
+func (s *Store) BatchCloser() (issueops.BatchCloser, error) {
+	inner, err := s.inner.BatchCloser()
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyBatchCloser(inner, s.readyPolicy()), nil
+}
+
 // ReadyClaimer narrows the claim's filter and delegates to the inner store's
 // own atomic ClaimNext, which wakes expired defers, selects, claims and
 // hydrates in one transaction. Cross-project state cannot be atomic with the

@@ -2,7 +2,9 @@ package externaldeps
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
@@ -109,4 +111,103 @@ var (
 	_ issueops.Reader       = (*policyReader)(nil)
 	_ issueops.ReadyCounter = (*policyReadyCounter)(nil)
 	_ issueops.ReadyClaimer = (*policyReadyClaimer)(nil)
+)
+
+// policyBatchCloser enforces the external close guard on every item and the
+// ready exclusions on the claim a batch earns, then delegates to a closer that
+// applies neither. One edge read serves both.
+//
+// A refused item is SKIPPED, not sent: the inner batch closes the survivors
+// in one transaction and the refusal lands at the item's own index, which is
+// the BatchCloser contract for any per-item refusal. A batch whose items were
+// all refused never reaches the inner closer, so it lands nothing and earns no
+// claim — exactly what the contract says a batch that closed nothing does.
+type policyBatchCloser struct {
+	inner  issueops.BatchCloser
+	policy readyPolicy
+}
+
+func newPolicyBatchCloser(inner issueops.BatchCloser, policy readyPolicy) issueops.BatchCloser {
+	return &policyBatchCloser{inner: inner, policy: policy}
+}
+
+func (c *policyBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	if err := storageissueops.ValidateCloseBatchRequest(req); err != nil {
+		return issueops.CloseBatchResult{}, err
+	}
+	if req.ClaimNext != nil {
+		if _, err := workapi.BuildReadyFilter(*req.ClaimNext); err != nil {
+			return issueops.CloseBatchResult{}, err
+		}
+	}
+	refs, err := c.policy.policy.Exclusions(ctx, c.policy.edges)
+	if err != nil {
+		return issueops.CloseBatchResult{}, err
+	}
+
+	outcomes := make([]issueops.CloseOutcome, len(req.Items))
+	sent := make([]int, 0, len(req.Items))
+	forwarded := req
+	forwarded.Items = make([]issueops.BatchCloseItem, 0, len(req.Items))
+	for i, item := range req.Items {
+		if blockers := refs[item.IssueID]; !req.Force && len(blockers) > 0 {
+			outcomes[i] = issueops.CloseOutcome{IssueID: item.IssueID, Err: externallyBlocked(item.IssueID, blockers)}
+			continue
+		}
+		sent = append(sent, i)
+		forwarded.Items = append(forwarded.Items, item)
+	}
+	if len(sent) == 0 {
+		return issueops.CloseBatchResult{Outcomes: outcomes}, nil
+	}
+	if req.ClaimNext != nil {
+		claim := *req.ClaimNext
+		claim.ExcludeIDs = unionExcludedIDs(claim.ExcludeIDs, refs)
+		forwarded.ClaimNext = &claim
+	}
+
+	result, err := c.inner.CloseBatch(ctx, forwarded)
+	if err != nil {
+		return issueops.CloseBatchResult{}, err
+	}
+	for j, outcome := range result.Outcomes {
+		outcomes[sent[j]] = outcome
+	}
+	return issueops.CloseBatchResult{Outcomes: outcomes, ClaimedNext: result.ClaimedNext}, nil
+}
+
+// policyIssueClaimer refuses a claim-by-id of an issue an unsatisfied
+// external blocker holds back, before the backend's atomic claim.
+type policyIssueClaimer struct {
+	inner  issueops.Claimer
+	policy readyPolicy
+}
+
+func newPolicyIssueClaimer(inner issueops.Claimer, policy readyPolicy) issueops.Claimer {
+	return &policyIssueClaimer{inner: inner, policy: policy}
+}
+
+func (c *policyIssueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (issueops.ClaimResult, error) {
+	if req.Actor != "" && req.IssueID != "" {
+		refs, err := c.policy.policy.Exclusions(ctx, c.policy.edges)
+		if err != nil {
+			return issueops.ClaimResult{}, err
+		}
+		if blockers := refs[req.IssueID]; len(blockers) > 0 {
+			return issueops.ClaimResult{}, externallyBlocked(req.IssueID, blockers)
+		}
+	}
+	// An empty actor or id is the inner role's validation refusal to make.
+	return c.inner.Claim(ctx, req)
+}
+
+// externallyBlocked is the refusal every guard in this package returns, in
+// the typed close vocabulary callers already classify with errors.Is.
+func externallyBlocked(id string, blockers []string) error {
+	return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+}
+
+var (
+	_ issueops.BatchCloser = (*policyBatchCloser)(nil)
+	_ issueops.Claimer     = (*policyIssueClaimer)(nil)
 )

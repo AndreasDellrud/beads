@@ -232,8 +232,11 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	if storage.RoleFiresHooks(roles.readyClaimer) {
 		t.Error("bd serve would run this workspace's hooks on every HTTP ready claim")
 	}
-	if storage.RoleFiresHooks(roles.batchCloser) || roles.batchCloser != issueops.BatchCloser(middle.batchCloser) {
-		t.Errorf("batch closer came from %p, want the layer directly beneath the hooks (%p)", roles.batchCloser, middle.batchCloser)
+	// The batch closer is policy-wrapped too: the external close guard and the
+	// claim's exclusions apply on the store arm (it used to promote straight to
+	// the layer beneath, which served externally blocked closes and claims).
+	if storage.RoleFiresHooks(roles.batchCloser) {
+		t.Error("bd serve would run this workspace's hooks on every HTTP batch close")
 	}
 	if storage.RoleFiresHooks(roles.batchCreator) || roles.batchCreator != issueops.BatchCreator(middle.batchCreator) {
 		t.Errorf("batch creator came from %p, want the layer directly beneath the hooks (%p)", roles.batchCreator, middle.batchCreator)

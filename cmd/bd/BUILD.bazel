@@ -523,6 +523,7 @@ go_test(
         "children_test.go",
         "claim_pools_embedded_test.go",
         "close_embedded_test.go",
+        "close_external_embedded_test.go",
         "close_failure_report_test.go",
         "close_gate_test.go",
         "close_last_touched_test.go",

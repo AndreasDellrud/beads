@@ -377,6 +377,16 @@ func TestServeStoreArmAppliesPolicyOnce(t *testing.T) {
 			_, err := roles.readyClaimer.ClaimNext(ctx, issueops.ClaimNextRequest{Actor: "w", Filter: issueops.ReadyRequest{Sort: "priority"}})
 			return err
 		},
+		"CloseBatch": func() error {
+			result, err := roles.batchCloser.CloseBatch(ctx, issueops.CloseBatchRequest{
+				Actor: "w", Items: []issueops.BatchCloseItem{{IssueID: "bd-held"}, {IssueID: "bd-free"}},
+				ClaimNext: &issueops.ReadyRequest{Sort: "priority"},
+			})
+			if err == nil && !errors.Is(result.Outcomes[0].Err, storage.ErrCloseBlocked) {
+				t.Errorf("serve batch close of externally blocked bd-held: outcome %+v, want ErrCloseBlocked", result.Outcomes[0])
+			}
+			return err
+		},
 	} {
 		before := stub.edgeReads
 		if err := call(); err != nil {
@@ -386,7 +396,10 @@ func TestServeStoreArmAppliesPolicyOnce(t *testing.T) {
 			t.Errorf("serve %s read the external edges %d times, want exactly 1", name, got)
 		}
 	}
-	for _, req := range []issueops.ReadyRequest{stub.ready[0], stub.counted[0], stub.claims[0].Filter} {
+	if len(stub.batches) != 1 || len(stub.batches[0].Items) != 1 || stub.batches[0].Items[0].IssueID != "bd-free" {
+		t.Fatalf("backend closer got %+v, want only the unblocked bd-free", stub.batches)
+	}
+	for _, req := range []issueops.ReadyRequest{stub.ready[0], stub.counted[0], stub.claims[0].Filter, *stub.batches[0].ClaimNext} {
 		if !slices.Equal(req.ExcludeIDs, []string{"bd-held"}) {
 			t.Errorf("backend role got ExcludeIDs=%v, want [bd-held]", req.ExcludeIDs)
 		}
