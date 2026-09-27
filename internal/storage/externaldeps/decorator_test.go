@@ -680,3 +680,29 @@ func issueIDs(issues []*types.Issue) []string {
 	}
 	return ids
 }
+
+// TestComposedIsTheLayerItself pins what bd serve's capability advertisement
+// rests on: Composed answers true for the policy layer itself on both seams,
+// false for a bare store or provider, and false for a nil or foreign value — it
+// never reaches beneath a value to find a buried layer.
+func TestComposedIsTheLayerItself(t *testing.T) {
+	locate := func(ProjectName) (string, bool) { return "", false }
+	var open StoreOpener
+	store := New(nil, locate, open)
+	provider := WrapUOWProvider(&fakeUOWProvider{}, locate, open)
+	for name, tc := range map[string]struct {
+		v    any
+		want bool
+	}{
+		"policy store":      {store, true},
+		"policy provider":   {provider, true},
+		"bare provider":     {&fakeUOWProvider{}, false},
+		"nil":               {nil, false},
+		"store inner value": {store.Unwrap(), false},
+		"foreign value":     {"not a layer", false},
+	} {
+		if got := Composed(tc.v); got != tc.want {
+			t.Errorf("%s: Composed = %v, want %v", name, got, tc.want)
+		}
+	}
+}

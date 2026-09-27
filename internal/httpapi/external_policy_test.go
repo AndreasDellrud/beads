@@ -256,3 +256,41 @@ func TestProviderArmReachesRolesThroughTheDecoratorsAccessors(t *testing.T) {
 		t.Fatalf("the provider beneath the decorator is %T, want the request's timedProvider", rewraps[0])
 	}
 }
+
+// TestExternalDependencyCapabilityFollowsTheConfig pins U7's wire half: GET
+// /v0/beads/context advertises policy.external_dependencies exactly when the
+// Config says the served roles carry the policy, and a server built without it
+// — the zero Config every embedder starts from — does not. The rest of the list
+// is the build-level Capabilities() either way.
+func TestExternalDependencyCapabilityFollowsTheConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		on   bool
+	}{
+		{"composed", true},
+		{"not composed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newTestServer(t, Config{ExternalDependencyPolicy: tc.on})
+			raw, _ := decodeBody(t, ts.get(t, "/v0/beads/context"))["capabilities"].([]any)
+			var got []string
+			for _, c := range raw {
+				got = append(got, c.(string))
+			}
+			if has := slices.Contains(got, "policy.external_dependencies"); has != tc.on {
+				t.Errorf("advertises policy.external_dependencies = %v, want %v (capabilities %v)", has, tc.on, got)
+			}
+			want := slices.Clone(Capabilities())
+			if tc.on {
+				want = append(want, "policy.external_dependencies")
+				slices.Sort(want)
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("capabilities = %v, want %v", got, want)
+			}
+			if !slices.IsSorted(got) {
+				t.Errorf("capabilities = %v, want them sorted", got)
+			}
+		})
+	}
+}

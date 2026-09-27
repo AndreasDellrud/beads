@@ -222,6 +222,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     transactions; `--json` then adds `remaining` and `has_more`. Loop while
     `has_more` is true.
 
+- **`bd serve` advertises `policy.external_dependencies`.** `GET
+  /v0/beads/context` now lists this behavior capability whenever the ready,
+  claim and close roles the server answers from carry bd's
+  `external:<project>:<capability>` dependency policy — every topology
+  `bd serve` composes itself. A client that sees it forwards ready and claim
+  requests as asked instead of applying the policy client-side. The token is
+  set from the composed store or provider (`httpapi.Config.ExternalDependencyPolicy`),
+  so a server built without the policy, including an embedder's, does not
+  advertise it.
+
 - **`bd backup` works on a proxied-server workspace bd runs the Dolt server
   for.** `bd backup init`, `sync`, `remove`, `status` and `restore` are routed
   over the proxied provider; before this, a proxied workspace — the default

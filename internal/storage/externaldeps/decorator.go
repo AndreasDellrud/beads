@@ -99,6 +99,27 @@ func Wrap(store storage.DoltStorage, locateProject ProjectLocator, openProject S
 	return New(store, locateProject, openProject)
 }
 
+// Composed reports whether v IS this package's policy layer — a store built by
+// New or Wrap (when Wrap wrapped), or a provider built by WrapUOWProvider — so
+// that every role its own accessors build carries the external-dependency
+// policy.
+//
+// It looks at v itself and never beneath it, on purpose: a policy layer buried
+// under another decorator reaches the roles taken off the outer value only if
+// that decorator delegates its accessors, which this package cannot see. A
+// caller that must advertise the policy (bd serve's
+// httpapi.Config.ExternalDependencyPolicy) therefore asks about the exact value
+// it takes its roles from, and a store Wrap returned unchanged — a client of a
+// bd server that enforces the policy itself — answers false.
+func Composed(v any) bool {
+	switch v.(type) {
+	case *Store, *uowProvider:
+		return true
+	default:
+		return false
+	}
+}
+
 // Unwrap exposes the decorated store to storage.UnwrapStore.
 func (s *Store) Unwrap() storage.DoltStorage { return s.inner }
 

@@ -321,6 +321,22 @@ type Config struct {
 	// a server without this flag would answer "you are caught up" to a consumer
 	// polling a workspace that will never emit a record.
 	EventsJournalEnabled bool
+	// ExternalDependencyPolicy reports that the ready, claim and close roles
+	// this server answers from — the role fields above, or the ones Provider's
+	// accessors build — carry bd's external-dependency policy
+	// (internal/storage/externaldeps), and turns on the
+	// policy.external_dependencies capability that tells a client so.
+	//
+	// IT ENFORCES NOTHING. This package cannot see which decorators a role
+	// wears, so the flag is the composer's statement about what it composed,
+	// and a client that sees the token forwards its request instead of
+	// applying the policy itself. Set it ONLY from the composed value — after
+	// the policy has been put on the source the roles come from, never from
+	// configuration — so an embedder cannot advertise a policy it never
+	// installed. cmd/bd/serve.go sets it from externaldeps.Composed on the very
+	// store or provider it serves from. The zero value advertises nothing,
+	// which is the safe answer for a server that does not know.
+	ExternalDependencyPolicy bool
 	// Workspace is the startup snapshot GET /v0/beads/context answers from.
 	// Only the allowlisted fields are ever serialized — see contextResponse,
 	// which names the whole set and the reasons for the exclusions.
@@ -536,7 +552,7 @@ func Listen(cfg Config) (*Server, error) {
 
 		log:      log.New(cfg.Stderr, "bd serve: ", log.LstdFlags|log.LUTC),
 		stdout:   cfg.Stdout,
-		ctxBody:  contextResponse(cfg.Workspace, cfg.SchemaVersion, Capabilities()),
+		ctxBody:  contextResponse(cfg.Workspace, cfg.SchemaVersion, AdvertisedCapabilities(cfg)),
 		hosts:    newHostPolicy(ip, cfg.AllowedHosts),
 		auth:     cfg.Auth,
 		idPrefix: prefix,
