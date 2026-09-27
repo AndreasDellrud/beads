@@ -6,4 +6,9 @@ go_test(
         "docsync_test.go",
         "doltpin_test.go",
     ],
+    data = [
+        "//:docsync_files",
+        "//internal/testutil:testdoltcommon.go",
+    ],
+    deps = ["//internal/testutil/bazeltest"],
 )

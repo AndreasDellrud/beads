@@ -352,3 +352,16 @@ go_test(
         "@com_github_google_uuid//:uuid",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

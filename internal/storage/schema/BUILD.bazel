@@ -155,6 +155,7 @@ go_test(
         "shared_store_migrate_gate_test.go",
         "smart_remote_migrate_gate_test.go",
     ],
+    data = [":migrations"],
     embed = [":schema"],
     deps = [
         "//internal/debug",
@@ -165,3 +166,24 @@ go_test(
         "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )
+
+# Migration SQL (up, down, ignored/) and the nondeterminism allowlist, read
+# from disk by schema and issueops tests beyond what the library embeds.
+filegroup(
+    name = "migrations",
+    srcs = glob(["migrations/**"]),
+    visibility = ["//internal/storage:__subpackages__"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

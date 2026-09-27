@@ -147,6 +147,7 @@ go_test(
         "version_reconciler_contract_test.go",
         "workspace_config_contract_test.go",
     ],
+    data = [":go_srcs"],
     embed = [":uow"],
     deps = [
         "//backend/conformance",
@@ -175,3 +176,16 @@ go_test(
         "@com_github_stretchr_testify//require",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

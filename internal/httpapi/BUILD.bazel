@@ -102,6 +102,11 @@ go_test(
         "update_test.go",
         "wire_bijection_test.go",
     ],
+    data = [
+        "claim.go",
+        "//cmd/bd:list.go",
+        "//cmd/bd:ready.go",
+    ],
     embed = [":httpapi"],
     deps = [
         "//internal/config",

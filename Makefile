@@ -411,10 +411,13 @@ docs-dev:
 
 # Bazel (side-by-side with the Go toolchain; `go build`/`go test` do not need
 # it). Regenerate BUILD.bazel files with gazelle and refresh the MODULE.bazel
-# use_repo list + MODULE.bazel.lock. Run after changing Go imports or go.mod.
+# use_repo list + MODULE.bazel.lock, then refresh the go_srcs filegroups that
+# source-scanning tests declare as data (tools/bazel/go_srcs.py). Run after
+# changing Go imports, go.mod, or packages.
 BAZEL ?= bazel
 bazel-sync:
 	$(BAZEL) run //:gazelle
+	python3 tools/bazel/go_srcs.py
 	$(BAZEL) mod tidy
 
 # Ensure -short is not used as an implicit CI tier boundary.

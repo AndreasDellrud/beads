@@ -1189,3 +1189,12 @@ go_test(
         "//conditions:default": [],
     }),
 )
+
+# CLI flag registrations pinned by //internal/httpapi spec parity tests.
+exports_files(
+    [
+        "list.go",
+        "ready.go",
+    ],
+    visibility = ["//internal/httpapi:__pkg__"],
+)
