@@ -83,6 +83,32 @@ func (c *policyReadyCounter) CountReady(ctx context.Context, req issueops.ReadyR
 	return c.inner.CountReady(ctx, narrowed)
 }
 
+// policyReadyLister narrows a listing exactly as policyReadyCounter narrows a
+// count: one edge read per call, the exclusions unioned into a clone of the
+// request's ExcludeIDs, and the request delegated to a lister that applies no
+// policy of its own — so the page and its total describe one narrowed set, in
+// the inner body's single pass.
+type policyReadyLister struct {
+	inner  issueops.ReadyLister
+	policy readyPolicy
+}
+
+func newPolicyReadyLister(inner issueops.ReadyLister, policy readyPolicy) issueops.ReadyLister {
+	return &policyReadyLister{inner: inner, policy: policy}
+}
+
+func (l *policyReadyLister) ListReady(ctx context.Context, req issueops.ReadyListRequest) (issueops.ReadyListing, error) {
+	if _, err := workapi.BuildReadyFilter(req.ReadyRequest); err != nil {
+		return issueops.ReadyListing{}, err
+	}
+	narrowed, err := l.policy.narrow(ctx, req.ReadyRequest)
+	if err != nil {
+		return issueops.ReadyListing{}, err
+	}
+	req.ReadyRequest = narrowed
+	return l.inner.ListReady(ctx, req)
+}
+
 type policyReadyClaimer struct {
 	inner  issueops.ReadyClaimer
 	policy readyPolicy
@@ -110,6 +136,7 @@ func (c *policyReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNe
 var (
 	_ issueops.Reader       = (*policyReader)(nil)
 	_ issueops.ReadyCounter = (*policyReadyCounter)(nil)
+	_ issueops.ReadyLister  = (*policyReadyLister)(nil)
 	_ issueops.ReadyClaimer = (*policyReadyClaimer)(nil)
 )
 

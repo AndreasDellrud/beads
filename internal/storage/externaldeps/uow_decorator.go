@@ -62,7 +62,7 @@ func (p *uowProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
 // every command that reaches the proxied seam through an optional source.
 func (p *uowProvider) IssueLifecycle() (publicops.Lifecycle, error) { return uow.NewIssueOperations(p) }
 
-// IssueReader, ReadyCounter and ReadyClaimer use the SAME role wrappers as the
+// IssueReader, ReadyCounter, ReadyLister and ReadyClaimer use the SAME role wrappers as the
 // store decorator (policy_roles.go): the exclusions are read once, in a
 // read-only unit of work of the undecorated provider, and the request is
 // delegated to a role over that undecorated provider. A role built over this
@@ -108,6 +108,13 @@ func (p *uowProvider) ReadyCounter() (publicops.ReadyCounter, error) {
 		return nil, err
 	}
 	return newPolicyReadyCounter(inner, p.readyPolicy()), nil
+}
+func (p *uowProvider) ReadyLister() (publicops.ReadyLister, error) {
+	inner, err := uow.NewReadyLister(p.UnitOfWorkProvider)
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyReadyLister(inner, p.readyPolicy()), nil
 }
 func (p *uowProvider) ReadyClaimer() (publicops.ReadyClaimer, error) {
 	inner, err := uow.NewReadyClaimer(p.UnitOfWorkProvider)
@@ -222,6 +229,7 @@ var (
 	_ uow.GraphCounterSource             = (*uowProvider)(nil)
 	_ uow.CounterSource                  = (*uowProvider)(nil)
 	_ uow.ReadyCounterSource             = (*uowProvider)(nil)
+	_ uow.ReadyListerSource              = (*uowProvider)(nil)
 	_ uow.ReadyClaimerSource             = (*uowProvider)(nil)
 	_ uow.QuerierSource                  = (*uowProvider)(nil)
 	_ uow.StatsReporterSource            = (*uowProvider)(nil)

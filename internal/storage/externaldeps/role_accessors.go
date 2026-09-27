@@ -38,6 +38,19 @@ func (s *Store) ReadyCounter() (issueops.ReadyCounter, error) {
 	return newPolicyReadyCounter(inner, s.readyPolicy()), nil
 }
 
+// ReadyLister narrows the listing exactly as ReadyCounter narrows the count and
+// delegates to the inner store's lister, so the page and its total still come
+// from the backend's single pass and the storage.ReadyLister.ListReady span
+// from the telemetry layer's own accessor. Without this override the accessor
+// would PROMOTE to the inner lister and list externally blocked work.
+func (s *Store) ReadyLister() (issueops.ReadyLister, error) {
+	inner, err := s.inner.ReadyLister()
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyReadyLister(inner, s.readyPolicy()), nil
+}
+
 // readyPolicy reads this store's edges from beneath every decorator, the same
 // source the store-level overrides use.
 func (s *Store) readyPolicy() readyPolicy {

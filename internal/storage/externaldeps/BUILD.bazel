@@ -45,6 +45,7 @@ go_test(
         "//internal/workapi",
         "//internal/workapi/storereader",
         "//internal/workapi/storereadycounter",
+        "//internal/workapi/storereadylister",
         "//issueops",
     ],
 )

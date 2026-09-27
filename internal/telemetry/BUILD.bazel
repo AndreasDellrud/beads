@@ -24,6 +24,7 @@ go_library(
         "querier.go",
         "ready_claimer.go",
         "ready_counter.go",
+        "ready_lister.go",
         "relations.go",
         "releaser.go",
         "stats_reporter.go",

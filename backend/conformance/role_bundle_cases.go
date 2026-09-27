@@ -594,6 +594,18 @@ var roleContractCases = []roleContract{
 		RunReadyCounterHonorsExcludeIDs,
 	),
 
+	roleCases("ReadyLister", "ReadyLister(), IssueReader() and ReadyCounter()", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *ReadyListerFixture { return b.ReadyLister },
+		RunReadyListerAgreesWithReadyAndCountReady,
+		RunReadyListerTotalCountsTheWispPlaneItAdmits,
+		RunReadyListerHonorsExcludeIDs,
+		RunReadyListerRefusesPastTheRowCap,
+		RunReadyListerRejectsWhatReadyRejects,
+		RunReadyListerEmptyFrontIsEmptyAndZero,
+		RunReadyListerWritesNothing,
+		RunReadyListerDoesNotMutateTheCallerRequest,
+	),
+
 	roleCases("Relations", "IssueRelations()", oncePerRole,
 		func(b RoleContractBundle) func(t *testing.T) *RelationsFixture { return b.Relations },
 		RunRelationsAnswersInThePinnedOrder,

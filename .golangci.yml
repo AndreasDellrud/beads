@@ -234,6 +234,8 @@ linters:
               desc: "a command reaches the summary role through store.StatsReporter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storestats/reporter.go"
             - pkg: github.com/steveyegge/beads/internal/workapi/storereadycounter
               desc: "a command reaches the ready-count role through store.ReadyCounter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storereadycounter/counter.go"
+            - pkg: github.com/steveyegge/beads/internal/workapi/storereadylister
+              desc: "a command reaches the ready-listing role through store.ReadyLister(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storereadylister/lister.go"
             - pkg: github.com/steveyegge/beads/internal/workapi/storequerier
               desc: "a command reaches the boolean-query role through store.Querier(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storequerier/querier.go"
         # beadserrors sits BENEATH every role leaf, so whatever it imports is

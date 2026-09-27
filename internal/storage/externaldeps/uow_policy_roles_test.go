@@ -105,6 +105,19 @@ func TestUOWReadyRolesApplyThePolicyOnce(t *testing.T) {
 	}
 	assertReads(t, "CountReady", counting, 1)
 
+	lister, err := provider.(uow.ReadyListerSource).ReadyLister()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listing, err := lister.ListReady(t.Context(), publicops.ReadyListRequest{ReadyRequest: publicops.ReadyRequest{Sort: "priority"}})
+	if err != nil {
+		t.Fatalf("ListReady: %v", err)
+	}
+	if ids := pageIDs(publicops.IssuePage{Items: listing.Items}); !slices.Equal(ids, []string{ready.ID}) || listing.Total != 1 || listing.HasMore {
+		t.Fatalf("ListReady = %v (total=%d more=%v), want [%s] total 1", ids, listing.Total, listing.HasMore, ready.ID)
+	}
+	assertReads(t, "ListReady", counting, 1)
+
 	claimed, err := claimer.ClaimNext(t.Context(), publicops.ClaimNextRequest{Actor: "w", Filter: publicops.ReadyRequest{Sort: "priority"}})
 	if err != nil {
 		t.Fatalf("ClaimNext: %v", err)

@@ -99,7 +99,7 @@ func TestInstrumentedStorageDeclaresEveryRoleAccessor(t *testing.T) {
 }
 
 // roleAccessorStore is a DoltStorage whose only real methods are the
-// twenty-eight role accessors, each answering with a distinguishable sentinel
+// twenty-nine role accessors, each answering with a distinguishable sentinel
 // so a test can tell an instrumented surface from a passed-through one.
 //
 // TWO sentinels rather than one: memoryops.Memories.List and issueops.Reader.List
@@ -145,6 +145,9 @@ func (s *roleAccessorStore) Commenter() (issueops.Commenter, error) { return s.s
 func (s *roleAccessorStore) ReadyCounter() (issueops.ReadyCounter, error) {
 	return s.surface, s.err
 }
+func (s *roleAccessorStore) ReadyLister() (issueops.ReadyLister, error) {
+	return s.surface, s.err
+}
 func (s *roleAccessorStore) Querier() (issueops.Querier, error) { return s.surface, s.err }
 func (s *roleAccessorStore) Sweeper() (issueops.Sweeper, error) {
 	return s.surface, s.err
@@ -178,7 +181,7 @@ func (s *roleAccessorStore) Releaser() (issueops.Releaser, error) {
 	return s.surface, s.err
 }
 
-// roleAccessorSentinel implements twenty-seven of the twenty-eight roles at
+// roleAccessorSentinel implements twenty-eight of the twenty-nine roles at
 // once — every one but memoryops.Memories, whose List collides with
 // issueops.Reader.List and needs the second sentinel below.
 // Nothing calls its methods; identity is the whole point.
@@ -256,6 +259,9 @@ func (*roleAccessorSentinel) ApplyBatch(context.Context, issueops.ApplyBatchRequ
 	return issueops.ApplyBatchResult{}, nil
 }
 
+func (*roleAccessorSentinel) ListReady(context.Context, issueops.ReadyListRequest) (issueops.ReadyListing, error) {
+	return issueops.ReadyListing{}, nil
+}
 func (*roleAccessorSentinel) CountReady(context.Context, issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
 	return issueops.ReadyCountResult{}, nil
 }
@@ -367,6 +373,7 @@ func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 		{"StatsReporter", func() (any, error) { return wrapped.StatsReporter() }, sentinel},
 		{"CycleDetector", func() (any, error) { return wrapped.CycleDetector() }, sentinel},
 		{"ReadyCounter", func() (any, error) { return wrapped.ReadyCounter() }, sentinel},
+		{"ReadyLister", func() (any, error) { return wrapped.ReadyLister() }, sentinel},
 		{"Querier", func() (any, error) { return wrapped.Querier() }, sentinel},
 		{"Sweeper", func() (any, error) { return wrapped.Sweeper() }, sentinel},
 		{"Deleter", func() (any, error) { return wrapped.Deleter() }, sentinel},
@@ -463,6 +470,7 @@ func TestInstrumentedStorageRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"StatsReporter", func() (any, error) { return wrapped.StatsReporter() }},
 		{"CycleDetector", func() (any, error) { return wrapped.CycleDetector() }},
 		{"ReadyCounter", func() (any, error) { return wrapped.ReadyCounter() }},
+		{"ReadyLister", func() (any, error) { return wrapped.ReadyLister() }},
 		{"Querier", func() (any, error) { return wrapped.Querier() }},
 		{"Sweeper", func() (any, error) { return wrapped.Sweeper() }},
 		{"Deleter", func() (any, error) { return wrapped.Deleter() }},

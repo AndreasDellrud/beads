@@ -244,6 +244,10 @@ func (p *notifyingProvider) ReadyCounter() (publicops.ReadyCounter, error) {
 	return NewReadyCounter(p)
 }
 
+func (p *notifyingProvider) ReadyLister() (publicops.ReadyLister, error) {
+	return NewReadyLister(p)
+}
+
 func (p *notifyingProvider) ReadyClaimer() (publicops.ReadyClaimer, error) {
 	return NewReadyClaimer(p)
 }
@@ -402,6 +406,7 @@ var (
 	_ GraphCounterSource        = (*notifyingProvider)(nil)
 	_ CounterSource             = (*notifyingProvider)(nil)
 	_ ReadyCounterSource        = (*notifyingProvider)(nil)
+	_ ReadyListerSource         = (*notifyingProvider)(nil)
 	_ ReadyClaimerSource        = (*notifyingProvider)(nil)
 	_ QuerierSource             = (*notifyingProvider)(nil)
 	_ StatsReporterSource       = (*notifyingProvider)(nil)

@@ -261,6 +261,14 @@ type Storage interface {
 	//
 	// Reads fire no hooks, as for IssueReader.
 	ReadyCounter() (issueops.ReadyCounter, error)
+	// ReadyLister returns the guarded ready-listing surface for this store: a
+	// page of ready work AND the size of the set it was cut from, answered in
+	// one pass — `bd ready`'s listing. Its own role rather than Reader.Ready
+	// plus ReadyCounter because two calls are two reads, and the published
+	// total has to describe the set the page came from.
+	//
+	// Reads fire no hooks, as for IssueReader.
+	ReadyLister() (issueops.ReadyLister, error)
 	// Querier returns the guarded boolean-query surface for this store: `bd
 	// query`'s expression language, which has OR, NOT and parentheses. Its own
 	// role rather than a mode of IssueReader because a ListRequest is a

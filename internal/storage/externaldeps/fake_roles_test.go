@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/internal/workapi/storereader"
 	"github.com/steveyegge/beads/internal/workapi/storereadycounter"
+	"github.com/steveyegge/beads/internal/workapi/storereadylister"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -21,6 +22,10 @@ func (f *fakeStore) IssueReader() (publicops.Reader, error) { return storereader
 
 func (f *fakeStore) ReadyCounter() (publicops.ReadyCounter, error) {
 	return storereadycounter.New(f)
+}
+
+func (f *fakeStore) ReadyLister() (publicops.ReadyLister, error) {
+	return storereadylister.New(f)
 }
 
 func (f *fakeStore) ReadyClaimer() (publicops.ReadyClaimer, error) {

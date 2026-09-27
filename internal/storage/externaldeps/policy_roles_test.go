@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi/storereader"
 	"github.com/steveyegge/beads/internal/workapi/storereadycounter"
+	"github.com/steveyegge/beads/internal/workapi/storereadylister"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -117,6 +118,37 @@ func TestReadyRolesMatchTheDecoratorBeforeTheMove(t *testing.T) {
 			if gotTotal != wantTotal {
 				t.Fatalf("CountReady = %d, before the move %d", gotTotal.Total, wantTotal.Total)
 			}
+
+			// The listing: before = the single-pass body over the decorator's
+			// store-level GetReadyWorkWithCountsAndTotal override (what `bd
+			// ready --json` called); after = the role narrowed and delegated.
+			beforeLister, err := storereadylister.New(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterLister, err := store.ReadyLister()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantListing, err := beforeLister.ListReady(t.Context(), publicops.ReadyListRequest{ReadyRequest: req})
+			if err != nil {
+				t.Fatalf("before ListReady: %v", err)
+			}
+			gotListing, err := afterLister.ListReady(t.Context(), publicops.ReadyListRequest{ReadyRequest: req})
+			if err != nil {
+				t.Fatalf("after ListReady: %v", err)
+			}
+			if !slices.Equal(pageIDs(publicops.IssuePage{Items: gotListing.Items}), pageIDs(publicops.IssuePage{Items: wantListing.Items})) ||
+				gotListing.HasMore != wantListing.HasMore || gotListing.Total != wantListing.Total {
+				t.Fatalf("ListReady = %+v, before the move %+v", gotListing, wantListing)
+			}
+			if !slices.Equal(pageIDs(publicops.IssuePage{Items: gotListing.Items}), pageIDs(got)) || gotListing.HasMore != got.HasMore {
+				t.Fatalf("ListReady page = %v (more=%v), Ready = %v (more=%v)",
+					pageIDs(publicops.IssuePage{Items: gotListing.Items}), gotListing.HasMore, pageIDs(got), got.HasMore)
+			}
+			if gotListing.Total != gotTotal.Total {
+				t.Fatalf("ListReady Total = %d, CountReady = %d", gotListing.Total, gotTotal.Total)
+			}
 		})
 	}
 
@@ -191,7 +223,15 @@ func TestReadyRolesReadEdgesOncePerCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lister, err := store.ReadyLister()
+	if err != nil {
+		t.Fatal(err)
+	}
 	calls := map[string]func() error{
+		"ListReady": func() error {
+			_, err := lister.ListReady(t.Context(), publicops.ReadyListRequest{ReadyRequest: publicops.ReadyRequest{Sort: "priority", Limit: intPtr(1)}})
+			return err
+		},
 		"Ready": func() error {
 			_, err := reader.Ready(t.Context(), publicops.ReadyRequest{Sort: "priority"})
 			return err
@@ -216,6 +256,10 @@ func TestReadyRolesReadEdgesOncePerCall(t *testing.T) {
 	}
 
 	invalid := map[string]func() error{
+		"ListReady": func() error {
+			_, err := lister.ListReady(t.Context(), publicops.ReadyListRequest{ReadyRequest: publicops.ReadyRequest{Sort: "bogus"}})
+			return err
+		},
 		"Ready": func() error {
 			_, err := reader.Ready(t.Context(), publicops.ReadyRequest{Sort: "bogus"})
 			return err
