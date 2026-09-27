@@ -100,6 +100,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates, deletes and demote-to-wisp.
 
 
+- **`bd close --continue` no longer auto-claims a molecule step an
+  unsatisfied `external:` dependency holds back.** Step readiness is computed
+  from the molecule's own edges, so such a step looked ready and was marked
+  in_progress on both the direct and the `--proxied-server` route. It is now
+  skipped (the next ready step, if any, is claimed instead).
+
 - **`bd serve`'s `POST /v0/beads/issues:batchApply` no longer closes work an
   unsatisfied `external:` dependency holds back.** On the store arm the
   applier bypassed the external-dependency policy entirely; on the provider

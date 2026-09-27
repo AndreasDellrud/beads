@@ -193,6 +193,30 @@ func (s *Store) guardExternalClaim(ctx context.Context, id string) error {
 	return nil
 }
 
+// GuardClaim refuses claiming id through store while an unsatisfied
+// `external:` blocker holds it back (ErrClaimBlocked, which wraps
+// ErrNotClaimable), when store's decorator chain carries this package's
+// policy; any other store — unpoliced, or a client of a server that enforces
+// the policy itself — answers nil.
+//
+// It is for callers that claim inside a storage transaction they open
+// themselves, which no Store override can see (the molecule port's step claim,
+// storeMolWriter.ClaimStepIfOpen). It resolves before that transaction opens,
+// and only id's own refs.
+func GuardClaim(ctx context.Context, store storage.DoltStorage, id string) error {
+	for store != nil {
+		if policy, ok := store.(*Store); ok {
+			return policy.guardExternalClaim(ctx, id)
+		}
+		inner, ok := store.(interface{ Unwrap() storage.DoltStorage })
+		if !ok {
+			return nil
+		}
+		store = inner.Unwrap()
+	}
+	return nil
+}
+
 // externalBlockersOf returns id's unsatisfied external refs, reading and
 // resolving only id's own edges.
 func (s *Store) externalBlockersOf(ctx context.Context, id string) ([]string, error) {

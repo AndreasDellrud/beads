@@ -118,3 +118,42 @@ func TestEmbeddedExternalCapabilityGuardsUpdateClaim(t *testing.T) {
 		t.Errorf("unblocked %s after --claim: status=%s assignee=%q, want claimed", free.ID, got.Status, got.Assignee)
 	}
 }
+
+// TestEmbeddedExternalCapabilityGuardsContinueStepClaim pins `bd close
+// --continue`'s auto-claim on the direct route (storeMolWriter.ClaimStepIfOpen,
+// a claim inside a transaction the store chain's policy cannot see). Molecule
+// step readiness is computed from within-molecule edges only, so the next step
+// an unsatisfied `external:` blocker holds looked ready and was claimed. It is
+// not claimed now; an unblocked next step still is.
+func TestEmbeddedExternalCapabilityGuardsContinueStepClaim(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "xc")
+	molecule := func(title string) (first, next *types.Issue) {
+		root := bdCreate(t, bd, dir, title, "--type", "epic", "--labels", "template")
+		first = bdCreate(t, bd, dir, title+" step 1", "--type", "task", "--parent", root.ID)
+		next = bdCreate(t, bd, dir, title+" step 2", "--type", "task", "--parent", root.ID, "--deps", "depends-on:"+first.ID)
+		return first, next
+	}
+	heldFirst, held := molecule("Held")
+	freeFirst, free := molecule("Free")
+	cmd := exec.Command(bd, "dep", "add", held.ID, "external:remote:payments")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd dep add: %v\n%s", err, out)
+	}
+
+	_ = bdClose(t, bd, dir, heldFirst.ID, "--continue")
+	if got := bdShow(t, bd, dir, held.ID); got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("--continue claimed externally blocked step %s (status=%s assignee=%q)", held.ID, got.Status, got.Assignee)
+	}
+	_ = bdClose(t, bd, dir, freeFirst.ID, "--continue")
+	if got := bdShow(t, bd, dir, free.ID); got.Status != types.StatusInProgress {
+		t.Errorf("--continue did not advance to the unblocked step %s (status=%s)", free.ID, got.Status)
+	}
+}

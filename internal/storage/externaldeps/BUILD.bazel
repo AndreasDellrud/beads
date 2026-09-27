@@ -30,6 +30,7 @@ go_test(
     srcs = [
         "batch_apply_guard_test.go",
         "batch_close_guard_test.go",
+        "claim_if_open_guard_test.go",
         "decorator_test.go",
         "fake_roles_test.go",
         "policy_roles_test.go",

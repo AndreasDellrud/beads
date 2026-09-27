@@ -76,6 +76,29 @@ func (p *uowProvider) resolveFor(ctx context.Context, ids ...string) (*preResolv
 	return &preResolved{satisfied: satisfied}, nil
 }
 
+// PreResolve prepares provider for ONE write transaction a caller opens itself
+// whose guarded claims or closes target ids: when provider is this package's
+// policy provider, it returns a copy carrying the ids' `external:` refs
+// resolved NOW, with no unit of work open, so the checks inside the caller's
+// transaction open no foreign store (a ref the resolution did not see fails
+// closed). Any other provider — the policy is not composed there, or a server
+// enforces it — is returned unchanged.
+//
+// It is for callers that must run a claim or close inside a transaction they
+// open (the molecule port's step claim after `bd close --continue`); a caller
+// holding a role gets this from the role.
+func PreResolve(ctx context.Context, provider uow.UnitOfWorkProvider, ids ...string) (uow.UnitOfWorkProvider, error) {
+	p, ok := provider.(*uowProvider)
+	if !ok {
+		return provider, nil
+	}
+	resolved, err := p.resolveFor(ctx, ids...)
+	if err != nil {
+		return nil, err
+	}
+	return p.withResolved(resolved), nil
+}
+
 // withResolved is this provider for ONE guarded call: same inner provider, same
 // policy, and the verdict resolveFor produced for it.
 func (p *uowProvider) withResolved(r *preResolved) *uowProvider {
@@ -721,12 +744,36 @@ func (u *issueUseCase) ClaimIssue(ctx context.Context, id, actor string) (domain
 	return u.IssueUseCase.ClaimIssue(ctx, id, actor)
 }
 
-// ClaimWisp is ClaimIssue's guard for the ephemeral plane.
+// ClaimWisp is ClaimIssue's guard for the ephemeral plane. Wisps carry
+// `external:` edges too (wisp_dependencies is read with dependencies).
 func (u *issueUseCase) ClaimWisp(ctx context.Context, id, actor string) (domain.ClaimResult, error) {
 	if err := u.guardExternalClaim(ctx, id); err != nil {
 		return domain.ClaimResult{}, err
 	}
 	return u.IssueUseCase.ClaimWisp(ctx, id, actor)
+}
+
+// ClaimIssueIfOpen is the molecule port's step claim (`bd close --continue`
+// auto-advancing to the next ready step, uowMolWriter.ClaimStepIfOpen). The
+// molecule's step readiness is computed from within-molecule edges only, so a
+// step an unsatisfied `external:` blocker holds looked ready and was claimed.
+// It now refuses with ErrClaimBlocked, the claim-by-id refusal, and the caller
+// moves on to the next ready step. A caller that pre-resolved the steps
+// (PreResolve) pays no foreign IO here.
+func (u *issueUseCase) ClaimIssueIfOpen(ctx context.Context, id, actor string) (domain.ClaimResult, error) {
+	if err := u.guardExternalClaim(ctx, id); err != nil {
+		return domain.ClaimResult{}, err
+	}
+	return u.IssueUseCase.ClaimIssueIfOpen(ctx, id, actor)
+}
+
+// ClaimWispIfOpen is ClaimIssueIfOpen's guard for the ephemeral plane, where
+// wisp molecules' steps live.
+func (u *issueUseCase) ClaimWispIfOpen(ctx context.Context, id, actor string) (domain.ClaimResult, error) {
+	if err := u.guardExternalClaim(ctx, id); err != nil {
+		return domain.ClaimResult{}, err
+	}
+	return u.IssueUseCase.ClaimWispIfOpen(ctx, id, actor)
 }
 
 // guardExternalClaim refuses claiming id while an unsatisfied external blocker

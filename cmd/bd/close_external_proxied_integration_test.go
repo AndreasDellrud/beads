@@ -80,3 +80,36 @@ func TestProxiedServerUpdateClaimHonorsExternalBlockers(t *testing.T) {
 		t.Errorf("unblocked %s after --claim: status=%s assignee=%q, want claimed", free.ID, got.Status, got.Assignee)
 	}
 }
+
+// TestProxiedServerContinueStepClaimHonorsExternalBlockers pins `bd close
+// --continue`'s auto-claim over a proxied server (uowMolWriter.ClaimStepIfOpen
+// -> ClaimIssueIfOpen inside the post-close transaction): an externally
+// blocked next step is not claimed; an unblocked one still is.
+func TestProxiedServerContinueStepClaimHonorsExternalBlockers(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "cxc")
+
+	molecule := func(title string) (first, next *types.Issue) {
+		root := bdProxiedCreate(t, bd, p.dir, title, "-t", "epic", "--labels", "template")
+		first = bdProxiedCreate(t, bd, p.dir, title+" step 1", "--parent", root.ID)
+		next = bdProxiedCreate(t, bd, p.dir, title+" step 2", "--parent", root.ID, "--deps", "depends-on:"+first.ID)
+		return first, next
+	}
+	heldFirst, held := molecule("Held")
+	freeFirst, free := molecule("Free")
+	if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "dep", "add", held.ID, "external:remote:payments"); err != nil {
+		t.Fatalf("bd dep add: %v\n%s\n%s", err, stdout, stderr)
+	}
+
+	bdProxiedClose(t, bd, p.dir, heldFirst.ID, "--continue")
+	bdProxiedClose(t, bd, p.dir, freeFirst.ID, "--continue")
+	db := openProxiedDB(t, p)
+	if got, who := readStatus(t, db, held.ID), readAssignee(t, db, held.ID); got != types.StatusOpen || who != "" {
+		t.Errorf("--continue claimed externally blocked step %s (status=%s assignee=%q)", held.ID, got, who)
+	}
+	if got := readStatus(t, db, free.ID); got != types.StatusInProgress {
+		t.Errorf("--continue did not advance to the unblocked step %s (status=%s)", free.ID, got)
+	}
+}
