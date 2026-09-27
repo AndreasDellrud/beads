@@ -770,7 +770,10 @@ func (s *Server) reader(r *http.Request) (issueops.Reader, error) {
 	if s.provider == nil {
 		return checkedReader{inner: s.issueReader}, nil
 	}
-	var src uow.IssueReaderSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.IssueReaderSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	rd, err := src.IssueReader()
 	if err != nil {
 		return nil, err
@@ -789,7 +792,10 @@ func (s *Server) statsReporter(r *http.Request) (issueops.StatsReporter, error) 
 	if s.provider == nil {
 		return s.issueStats, nil
 	}
-	var src uow.StatsReporterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.StatsReporterSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.StatsReporter()
 }
 
@@ -804,7 +810,10 @@ func (s *Server) cycleDetector(r *http.Request) (issueops.CycleDetector, error) 
 	if s.provider == nil {
 		return s.issueCycles, nil
 	}
-	var src uow.CycleDetectorSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.CycleDetectorSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.CycleDetector()
 }
 
@@ -819,7 +828,10 @@ func (s *Server) claimer(r *http.Request) (issueops.Claimer, error) {
 	if s.provider == nil {
 		return checkedClaimer{inner: s.issueClaimer}, nil
 	}
-	var src uow.IssueClaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.IssueClaimerSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	cl, err := src.IssueClaimer()
 	if err != nil {
 		return nil, err
@@ -840,7 +852,10 @@ func (s *Server) batchCloser(r *http.Request) (issueops.BatchCloser, error) {
 	if s.provider == nil {
 		return checkedBatchCloser{inner: s.issueBatchCloser}, nil
 	}
-	var src uow.BatchCloserSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.BatchCloserSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	closer, err := src.BatchCloser()
 	if err != nil {
 		return nil, err
@@ -863,7 +878,10 @@ func (s *Server) readyClaimer(r *http.Request) (issueops.ReadyClaimer, error) {
 	if s.provider == nil {
 		return s.issueReadyClaimer, nil
 	}
-	var src uow.ReadyClaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.ReadyClaimerSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.ReadyClaimer()
 }
 
@@ -879,7 +897,10 @@ func (s *Server) releaser(r *http.Request) (issueops.Releaser, error) {
 	if s.provider == nil {
 		return checkedReleaser{inner: s.issueReleaser}, nil
 	}
-	var src uow.ReleaserSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.ReleaserSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	rel, err := src.Releaser()
 	if err != nil {
 		return nil, err
@@ -898,7 +919,10 @@ func (s *Server) lifecycle(r *http.Request) (issueops.Lifecycle, error) {
 	if s.provider == nil {
 		return checkedLifecycle{inner: s.issueLifecycle}, nil
 	}
-	var src uow.IssueLifecycleSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.IssueLifecycleSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	lc, err := src.IssueLifecycle()
 	if err != nil {
 		return nil, err
@@ -918,7 +942,10 @@ func (s *Server) workspaceConfig(r *http.Request) (issueops.WorkspaceConfig, err
 	if s.provider == nil {
 		return s.settings, nil
 	}
-	var src uow.WorkspaceConfigSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.WorkspaceConfigSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.WorkspaceConfig()
 }
 
@@ -932,7 +959,10 @@ func (s *Server) edgeReader(r *http.Request) (issueops.EdgeReader, error) {
 	if s.provider == nil {
 		return s.issueEdges, nil
 	}
-	var src uow.EdgeReaderSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.EdgeReaderSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.EdgeReader()
 }
 
@@ -947,7 +977,10 @@ func (s *Server) graphCounter(r *http.Request) (issueops.GraphCounter, error) {
 	if s.provider == nil {
 		return s.issueEdgeCounter, nil
 	}
-	var src uow.GraphCounterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.GraphCounterSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.GraphCounter()
 }
 
@@ -964,7 +997,10 @@ func (s *Server) relations(r *http.Request) (issueops.Relations, error) {
 	if s.provider == nil {
 		return s.issueRelations, nil
 	}
-	var src uow.RelationsSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.RelationsSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.IssueRelations()
 }
 
@@ -980,7 +1016,10 @@ func (s *Server) commenter(r *http.Request) (issueops.Commenter, error) {
 	if s.provider == nil {
 		return checkedCommenter{inner: s.issueCommenter}, nil
 	}
-	var src uow.CommenterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.CommenterSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	c, err := src.Commenter()
 	if err != nil {
 		return nil, err
@@ -997,7 +1036,10 @@ func (s *Server) blockingAnnotator(r *http.Request) (issueops.BlockingAnnotator,
 	if s.provider == nil {
 		return s.issueBlocking, nil
 	}
-	var src uow.BlockingAnnotatorSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.BlockingAnnotatorSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.BlockingAnnotator()
 }
 
@@ -1011,7 +1053,10 @@ func (s *Server) treeWalker(r *http.Request) (issueops.TreeWalker, error) {
 	if s.provider == nil {
 		return s.issueTree, nil
 	}
-	var src uow.TreeWalkerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.TreeWalkerSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.TreeWalker()
 }
 
@@ -1026,7 +1071,10 @@ func (s *Server) readyCounter(r *http.Request) (issueops.ReadyCounter, error) {
 	if s.provider == nil {
 		return s.issueReadyCounter, nil
 	}
-	var src uow.ReadyCounterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.ReadyCounterSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.ReadyCounter()
 }
 
@@ -1044,7 +1092,10 @@ func (s *Server) counter(r *http.Request) (issueops.Counter, error) {
 	if s.provider == nil {
 		return s.issueCounter, nil
 	}
-	var src uow.CounterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.CounterSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.Counter()
 }
 
@@ -1057,7 +1108,10 @@ func (s *Server) querier(r *http.Request) (issueops.Querier, error) {
 	if s.provider == nil {
 		return s.issueQuerier, nil
 	}
-	var src uow.QuerierSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.QuerierSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.Querier()
 }
 
@@ -1074,7 +1128,10 @@ func (s *Server) sweeper(r *http.Request) (issueops.Sweeper, error) {
 	if s.provider == nil {
 		return s.issueSweeper, nil
 	}
-	var src uow.SweeperSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.SweeperSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.Sweeper()
 }
 
@@ -1091,7 +1148,10 @@ func (s *Server) deleter(r *http.Request) (issueops.Deleter, error) {
 	if s.provider == nil {
 		return s.issueDeleter, nil
 	}
-	var src uow.DeleterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.DeleterSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.Deleter()
 }
 
@@ -1107,7 +1167,10 @@ func (s *Server) batchCreator(r *http.Request) (issueops.BatchCreator, error) {
 	if s.provider == nil {
 		return checkedBatchCreator{inner: s.issueBatchCreator}, nil
 	}
-	var src uow.BatchCreatorSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.BatchCreatorSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	creator, err := src.BatchCreator()
 	if err != nil {
 		return nil, err
@@ -1130,7 +1193,10 @@ func (s *Server) dependencyEditor(r *http.Request) (issueops.DependencyEditor, e
 	if s.provider == nil {
 		return s.issueDependencies, nil
 	}
-	var src uow.DependencyEditorSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.DependencyEditorSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.DependencyEditor()
 }
 
@@ -1144,7 +1210,10 @@ func (s *Server) metadataCAS(r *http.Request) (issueops.MetadataCAS, error) {
 	if s.provider == nil {
 		return s.issueMetadataCAS, nil
 	}
-	var src uow.MetadataCASSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.MetadataCASSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.MetadataCAS()
 }
 
@@ -1165,7 +1234,10 @@ func (s *Server) batchApplier(r *http.Request) (issueops.BatchApplier, error) {
 	if s.provider == nil {
 		return s.issueBatchApplier, nil
 	}
-	var src uow.BatchApplierSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.BatchApplierSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.BatchApplier()
 }
 
@@ -1180,7 +1252,10 @@ func (s *Server) memories(r *http.Request) (memoryops.Memories, error) {
 	if s.provider == nil {
 		return s.workspaceMemories, nil
 	}
-	var src uow.MemoriesSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.MemoriesSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.Memories()
 }
 
@@ -1208,8 +1283,47 @@ func (s *Server) eventsJournalCursor(r *http.Request) (storage.EventsJournalCurs
 		}
 		return s.eventsJournal, nil
 	}
-	var src uow.EventsJournalCursorSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	src, err := providerSource[uow.EventsJournalCursorSource](s, r)
+	if err != nil {
+		return nil, err
+	}
 	return src.EventsJournalCursor()
+}
+
+// requestProvider is the provider one request's roles are built from.
+//
+// Every unit of work the request opens has to go through timedProvider so it
+// lands in this request's uow_ms, and every role has to come from the
+// configured provider's OWN accessors so a decorating provider — the
+// external-dependency policy bd serve installs — applies its role-level layer
+// exactly as it does for the CLI. Both hold at once by putting the timing
+// BENEATH any decorator that can rewrap itself (uow.ProviderRewrapper), and
+// around a plain provider as before.
+func (s *Server) requestProvider(r *http.Request) uow.UnitOfWorkProvider {
+	return timedBeneath(s.provider, requestInfo(r.Context()))
+}
+
+func timedBeneath(p uow.UnitOfWorkProvider, rec *reqInfo) uow.UnitOfWorkProvider {
+	if rw, ok := p.(uow.ProviderRewrapper); ok {
+		if inner := rw.Unwrap(); inner != nil {
+			return rw.Rewrap(timedBeneath(inner, rec))
+		}
+	}
+	return timedProvider{inner: p, rec: rec}
+}
+
+// providerSource asks this request's provider for one capability accessor. A
+// provider that does not offer it is an error, not a panic: every provider in
+// the tree offers every source this server calls (timedProvider and the
+// external-dependency policy assert the full set at compile time).
+func providerSource[S any](s *Server, r *http.Request) (S, error) {
+	p := s.requestProvider(r)
+	src, ok := p.(S)
+	if !ok {
+		var zero S
+		return zero, fmt.Errorf("httpapi: provider %T does not offer %T", p, (*S)(nil))
+	}
+	return src, nil
 }
 
 // WithUOW runs fn inside one unit of work and guarantees the rollback.

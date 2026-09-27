@@ -32,11 +32,23 @@ type uowProvider struct {
 var _ uow.UnitOfWorkProvider = (*uowProvider)(nil)
 var _ uow.MaintenanceProvider = (*uowProvider)(nil)
 var _ uow.ProviderUnwrapper = (*uowProvider)(nil)
+var _ uow.ProviderRewrapper = (*uowProvider)(nil)
 
 // Unwrap lets callers deliberately peel policy decorators. In particular,
 // bd serve must get beneath the notifying provider before handing a provider
 // to HTTP handlers, which must never run workspace hooks.
 func (p *uowProvider) Unwrap() uow.UnitOfWorkProvider { return p.UnitOfWorkProvider }
+
+// Rewrap puts this policy, unchanged, over a different inner provider. bd
+// serve's HTTP layer uses it to slide its per-request timing provider BENEATH
+// the policy, so served requests reach their roles through the accessors below
+// — the same role-level policy the CLI uses — instead of around them.
+func (p *uowProvider) Rewrap(inner uow.UnitOfWorkProvider) uow.UnitOfWorkProvider {
+	if inner == nil {
+		return nil
+	}
+	return &uowProvider{UnitOfWorkProvider: inner, policy: p.policy}
+}
 
 // RunNonTx preserves the optional maintenance capability exposed by the
 // proxied provider. Wrapping the provider must not make unrelated commands
@@ -143,8 +155,18 @@ func (p *uowProvider) CycleDetector() (publicops.CycleDetector, error) {
 	return uow.NewCycleDetector(p)
 }
 func (p *uowProvider) Commenter() (publicops.Commenter, error) { return uow.NewCommenter(p) }
+
+// BatchCloser uses the SAME policy wrapper as the store decorator: one edge
+// read guards every item (re-closing an already-closed item stays a no-op) and
+// narrows the claim the batch earns, and the batch itself runs on a closer over
+// the undecorated provider, so the use-case overrides do not apply the policy
+// a second time — once per item — beneath it.
 func (p *uowProvider) BatchCloser() (publicops.BatchCloser, error) {
-	return uow.NewBatchCloser(p)
+	inner, err := uow.NewBatchCloser(p.UnitOfWorkProvider)
+	if err != nil {
+		return nil, err
+	}
+	return newPolicyBatchCloser(inner, p.readyPolicy()), nil
 }
 func (p *uowProvider) BatchCreator() (publicops.BatchCreator, error) {
 	return uow.NewBatchCreator(p)

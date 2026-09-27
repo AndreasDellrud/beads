@@ -151,6 +151,22 @@ type ProviderUnwrapper interface {
 	Unwrap() UnitOfWorkProvider
 }
 
+// ProviderRewrapper is a provider decorator that can put its own layer over a
+// DIFFERENT inner provider: Rewrap(x) is the same decorator, configured the
+// same way, wrapped around x instead of around Unwrap().
+//
+// It exists for a per-request decorator that must sit BENEATH a policy
+// decorator rather than around it. internal/httpapi times every unit of work a
+// request opens by wrapping the provider for that request; wrapped around the
+// external-dependency policy, the roles it built bypassed the policy's own
+// accessors. Rewrapping puts the timing underneath, so the request reaches its
+// roles through the policy's accessors and every unit of work those roles open
+// is still timed.
+type ProviderRewrapper interface {
+	ProviderUnwrapper
+	Rewrap(inner UnitOfWorkProvider) UnitOfWorkProvider
+}
+
 // unitOfWorkUnwrapper is the same idea one level down, for decorators that wrap
 // a unit of work.
 type unitOfWorkUnwrapper interface {
