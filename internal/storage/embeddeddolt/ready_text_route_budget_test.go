@@ -42,6 +42,12 @@ func TestReadyTextRouteStatementBudget(t *testing.T) {
 		// still fewer statements, because the counts read hydrates in bulk.
 		{"issues_only/limit100", readyTotalWorld{}, false, 100, 3},
 		{"wisps/include_ephemeral/limit100", readyTotalWorld{wisps: true}, true, 100, 5},
+		// --limit 0 (unbounded): there is no count on either route, and the
+		// page is its own total. The single pass hydrates dependency, dependent
+		// and comment COUNTS for every row where the legacy read hydrated
+		// labels and dependency state — measured here rather than assumed.
+		{"issues_only/limit0", readyTotalWorld{}, false, 0, 2},
+		{"wisps/include_ephemeral/limit0", readyTotalWorld{wisps: true}, true, 0, 3},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

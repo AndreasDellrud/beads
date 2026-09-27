@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,69 +31,48 @@ func TestProxiedReadyGoldenOutput(t *testing.T) {
 			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
 	}
-	seedReadyGoldenWorkspace(run)
+	seedReadyGoldenWorkspace(t, p.dir, newReadyGoldenForeignProject(t, bd), run)
 
 	// The claimant is pinned: the fallback actor is the machine's user name.
 	claimEnv := []string{"BEADS_ACTOR=golden-claimer"}
-	cases := []struct {
-		name string
-		args []string
-		env  []string
-	}{
-		{"json_default", []string{"ready", "--json"}, nil},
-		{"json_limit2", []string{"ready", "--json", "--limit", "2"}, nil},
-		{"json_limit2_envelope", []string{"ready", "--json", "--limit", "2"}, []string{"BD_JSON_ENVELOPE=1"}},
-		{"json_limit0", []string{"ready", "--json", "--limit", "0"}, nil},
-		{"json_limit0_envelope", []string{"ready", "--json", "--limit", "0"}, []string{"BD_JSON_ENVELOPE=1"}},
-		{"json_gc_include_ephemeral_limit0", []string{"ready", "--json", "--include-ephemeral", "--limit", "0"}, nil},
-		{"json_brief", []string{"ready", "--json", "--brief", "--limit", "0"}, nil},
-		{"json_label", []string{"ready", "--json", "--label", "team-a"}, nil},
-		{"json_assignee_priority_sort", []string{"ready", "--json", "--assignee", "alice", "--sort", "priority"}, nil},
-		{"json_offset1_limit2", []string{"ready", "--json", "--offset", "1", "--limit", "2"}, nil},
-		{"json_offset1_limit2_envelope", []string{"ready", "--json", "--offset", "1", "--limit", "2"}, []string{"BD_JSON_ENVELOPE=1"}},
-		{"json_empty", []string{"ready", "--json", "--label", "nobody"}, nil},
-		{"text_default", []string{"ready"}, nil},
-		{"text_limit2", []string{"ready", "--limit", "2"}, nil},
-		{"text_limit0", []string{"ready", "--limit", "0"}, nil},
-		{"text_plain_limit2", []string{"ready", "--plain", "--limit", "2"}, nil},
-		{"text_pretty", []string{"ready", "--pretty"}, nil},
-		{"text_pretty_limit2", []string{"ready", "--pretty", "--limit", "2"}, nil},
-		{"text_include_ephemeral", []string{"ready", "--include-ephemeral", "--limit", "0"}, nil},
-		{"text_empty", []string{"ready", "--label", "nobody"}, nil},
-		{"text_max_rows_refused", []string{"ready", "--limit", "0", "--max-rows", "2"}, nil},
-		{"json_claim", []string{"ready", "--claim", "--json"}, claimEnv},
-		{"text_claim", []string{"ready", "--claim"}, claimEnv},
-		{"json_claim_none", []string{"ready", "--claim", "--json", "--label", "nobody"}, claimEnv},
-		{"text_claim_none", []string{"ready", "--claim", "--label", "nobody"}, claimEnv},
-	}
+	cases := append([]readyGoldenCase{
+		{name: "json_default", args: []string{"ready", "--json"}},
+		{name: "json_limit2", args: []string{"ready", "--json", "--limit", "2"}},
+		{name: "json_limit2_envelope", args: []string{"ready", "--json", "--limit", "2"}, env: []string{"BD_JSON_ENVELOPE=1"}},
+		{name: "json_limit0", args: []string{"ready", "--json", "--limit", "0"}},
+		{name: "json_limit0_envelope", args: []string{"ready", "--json", "--limit", "0"}, env: []string{"BD_JSON_ENVELOPE=1"}},
+		{name: "json_gc_include_ephemeral_limit0", args: []string{"ready", "--json", "--include-ephemeral", "--limit", "0"}},
+		{name: "json_brief", args: []string{"ready", "--json", "--brief", "--limit", "0"}},
+		{name: "json_label", args: []string{"ready", "--json", "--label", "team-a"}},
+		{name: "json_assignee_priority_sort", args: []string{"ready", "--json", "--assignee", "alice", "--sort", "priority"}},
+		{name: "json_offset1_limit2", args: []string{"ready", "--json", "--offset", "1", "--limit", "2"}},
+		{name: "json_offset1_limit2_envelope", args: []string{"ready", "--json", "--offset", "1", "--limit", "2"}, env: []string{"BD_JSON_ENVELOPE=1"}},
+		{name: "json_empty", args: []string{"ready", "--json", "--label", "nobody"}},
+		{name: "text_default", args: []string{"ready"}},
+		{name: "text_limit2", args: []string{"ready", "--limit", "2"}},
+		{name: "text_limit0", args: []string{"ready", "--limit", "0"}},
+		{name: "text_pretty", args: []string{"ready", "--pretty"}},
+		{name: "text_pretty_limit2", args: []string{"ready", "--pretty", "--limit", "2"}},
+		{name: "text_include_ephemeral", args: []string{"ready", "--include-ephemeral", "--limit", "0"}},
+		{name: "text_empty", args: []string{"ready", "--label", "nobody"}},
+		{name: "text_max_rows_refused", args: []string{"ready", "--limit", "0", "--max-rows", "2"}},
+	}, sharedReadyGoldenCases...)
+	// The claim cases mutate the workspace, so they run last and in order.
+	cases = append(cases,
+		readyGoldenCase{name: "json_claim", args: []string{"ready", "--claim", "--json"}, env: claimEnv},
+		readyGoldenCase{name: "text_claim", args: []string{"ready", "--claim"}, env: claimEnv},
+		readyGoldenCase{name: "json_claim_none", args: []string{"ready", "--claim", "--json", "--label", "nobody"}, env: claimEnv},
+		readyGoldenCase{name: "text_claim_none", args: []string{"ready", "--claim", "--label", "nobody"}, env: claimEnv},
+	)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, tc.args...)
-			exit := "0"
-			if err != nil {
-				exit = "nonzero"
-			}
-			got := "$ bd " + strings.Join(tc.args, " ") + "\n" +
-				"--- exit: " + exit + "\n" +
-				"--- stdout\n" + normalizeReadyGolden(stdout) +
-				"--- stderr\n" + normalizeReadyGolden(stderr)
-			path := filepath.Join("testdata", "ready_golden_proxied", tc.name+".golden")
-			if *updateReadyGolden {
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("read golden (regenerate with -update-ready-golden): %v", err)
-			}
-			if !bytes.Equal([]byte(got), want) {
-				t.Errorf("bd %s output changed.\n--- got\n%s\n--- want\n%s", strings.Join(tc.args, " "), got, want)
-			}
+			cmd := exec.Command(bd, tc.args...)
+			cmd.Dir = filepath.Join(p.dir, tc.sub)
+			cmd.Env = append(bdProxiedEnv(p.dir), tc.env...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			checkReadyGolden(t, "ready_golden_proxied", tc, stdout.String(), stderr.String(), err)
 		})
 	}
 }
