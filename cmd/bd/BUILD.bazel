@@ -457,6 +457,9 @@ go_binary(
 
 go_test(
     name = "bd_test",
+    # -race -short runs ~10 min (pr-core gives go test -timeout=30m).
+    size = "large",
+    timeout = "long",
     srcs = [
         "aaa_stdio_baseline_test.go",
         "actor_test.go",

@@ -90,6 +90,9 @@ go_library(
 
 go_test(
     name = "embeddeddolt_test",
+    # -race -short runs ~6 min (pr-core gives go test -timeout=30m).
+    size = "large",
+    timeout = "long",
     srcs = [
         "active_database_size_test.go",
         "batch_apply_contract_test.go",
