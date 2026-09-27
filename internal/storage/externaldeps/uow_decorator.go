@@ -80,18 +80,12 @@ func (p *uowProvider) IssueReader() (publicops.Reader, error) {
 	return newPolicyReader(rest, inner, p.readyPolicy()), nil
 }
 
-// IssueClaimer refuses a claim-by-id of externally blocked work, which the
-// store decorator's claimer has always done: the use-case overrides below do
-// not cover ClaimIssue, so without this the proxied `bd update --claim` and
-// serve's provider arm claimed it. The claim itself stays on a role over this
-// wrapper, so its hooks and transaction are unchanged.
-func (p *uowProvider) IssueClaimer() (publicops.Claimer, error) {
-	inner, err := uow.NewIssueClaimer(p)
-	if err != nil {
-		return nil, err
-	}
-	return newPolicyIssueClaimer(inner, p.readyPolicy()), nil
-}
+// IssueClaimer builds the claim-by-id role over THIS wrapper, so its unit of
+// work's IssueUseCase is the policy's and ClaimIssue below refuses externally
+// blocked work inside the claim's own transaction. That override is what
+// covers every caller — this accessor, `bd update --claim` over a proxied
+// server, and any raw-UOW caller — rather than a guard layered on the role.
+func (p *uowProvider) IssueClaimer() (publicops.Claimer, error)     { return uow.NewIssueClaimer(p) }
 func (p *uowProvider) IssueRelations() (publicops.Relations, error) { return uow.NewIssueRelations(p) }
 func (p *uowProvider) EdgeReader() (publicops.EdgeReader, error)    { return uow.NewEdgeReader(p) }
 func (p *uowProvider) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
@@ -390,6 +384,23 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 		result = append(result, &types.BlockedIssue{Issue: *issue, BlockedByCount: len(refs), BlockedBy: refs})
 	}
 	return finishBlockedIssues(result, filter)
+}
+
+// ClaimIssue refuses a claim-by-id of an issue an unsatisfied external blocker
+// holds back, reading the edges in THIS unit of work before the compare-and-set
+// runs in it. The store arm has always refused this (externaldeps.Store's
+// IssueClaimer); without the override the unit-of-work arm — proxied `bd
+// update --claim`, and serve's provider arm, whose claim role is built over
+// this provider — claimed it.
+func (u *issueUseCase) ClaimIssue(ctx context.Context, id, actor string) (domain.ClaimResult, error) {
+	state, err := u.blockingState(ctx)
+	if err != nil {
+		return domain.ClaimResult{}, err
+	}
+	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
+		return domain.ClaimResult{}, externallyBlocked(id, blockers)
+	}
+	return u.IssueUseCase.ClaimIssue(ctx, id, actor)
 }
 
 func (u *issueUseCase) CloseIssueChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {

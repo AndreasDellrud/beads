@@ -203,31 +203,6 @@ func (c *policyBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBa
 	return issueops.CloseBatchResult{Outcomes: outcomes, ClaimedNext: result.ClaimedNext}, nil
 }
 
-// policyIssueClaimer refuses a claim-by-id of an issue an unsatisfied
-// external blocker holds back, before the backend's atomic claim.
-type policyIssueClaimer struct {
-	inner  issueops.Claimer
-	policy readyPolicy
-}
-
-func newPolicyIssueClaimer(inner issueops.Claimer, policy readyPolicy) issueops.Claimer {
-	return &policyIssueClaimer{inner: inner, policy: policy}
-}
-
-func (c *policyIssueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (issueops.ClaimResult, error) {
-	if req.Actor != "" && req.IssueID != "" {
-		refs, err := c.policy.policy.Exclusions(ctx, c.policy.edges)
-		if err != nil {
-			return issueops.ClaimResult{}, err
-		}
-		if blockers := refs[req.IssueID]; len(blockers) > 0 {
-			return issueops.ClaimResult{}, externallyBlocked(req.IssueID, blockers)
-		}
-	}
-	// An empty actor or id is the inner role's validation refusal to make.
-	return c.inner.Claim(ctx, req)
-}
-
 // externallyBlocked is the refusal every guard in this package returns, in
 // the typed close vocabulary callers already classify with errors.Is.
 func externallyBlocked(id string, blockers []string) error {
@@ -236,5 +211,4 @@ func externallyBlocked(id string, blockers []string) error {
 
 var (
 	_ issueops.BatchCloser = (*policyBatchCloser)(nil)
-	_ issueops.Claimer     = (*policyIssueClaimer)(nil)
 )
