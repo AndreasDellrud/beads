@@ -10,6 +10,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/beads",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/ceiling",
         "//internal/configfile",
         "//internal/git",
         "//internal/storage",
@@ -34,6 +35,7 @@ go_test(
     ],
     embed = [":beads"],
     deps = [
+        "//internal/ceiling",
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/git",

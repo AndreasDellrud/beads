@@ -351,6 +351,7 @@ go_library(
         "//internal/atomicfile",
         "//internal/audit",
         "//internal/beads",
+        "//internal/ceiling",
         "//internal/compact",
         "//internal/config",
         "//internal/configfile",
@@ -1124,12 +1125,6 @@ go_test(
     data = glob(["testdata/**"]) + [
         ":bd_for_tests",
         ":go_srcs",
-        # The module root marker: config.Initialize stops its .beads/config.yaml
-        # walk there under BEADS_TEST_IGNORE_REPO_CONFIG, as it does at the
-        # checkout root under go test. Without it the walk climbs out of the
-        # runfiles tree and, when the output base is under $HOME, loads the
-        # developer's ~/.beads/config.yaml (e.g. dolt.shared-server: true).
-        "//:go.mod",
         "//:bd_test_files",
         "//cmd/bd/doctor:go_srcs",
         "//cmd/bd/doctor/fix:go_srcs",
