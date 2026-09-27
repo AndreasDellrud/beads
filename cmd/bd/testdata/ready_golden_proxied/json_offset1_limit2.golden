@@ -41,4 +41,4 @@ $ bd ready --json --offset 1 --limit 2
   }
 ]
 --- stderr
-Showing 2 ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.
+Showing 2 of 5 ready issues. Use --limit 0 for all, or --limit N to raise the cap.

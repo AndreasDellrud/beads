@@ -9,6 +9,6 @@ Ready: 2 issues with no active blockers
 
 Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
 Priority: P0–P4 (label only; not a status icon)
-Showing 2 ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.
+Showing 2 of 5 ready issues. Use -n to show more.
 
 --- stderr

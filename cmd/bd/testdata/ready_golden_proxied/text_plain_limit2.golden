@@ -8,6 +8,6 @@ $ bd ready --plain --limit 2
 2. [P1] [task] gd-alpha: Alpha task
    Estimate: 30 min
 
-Showing 2 ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.
+Showing 2 of 5 ready issues. Use -n to show more.
 
 --- stderr

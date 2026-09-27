@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -134,84 +133,43 @@ func runReadyProxiedList(ctx context.Context, in readyInput) error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	// HasMore is "the limit hid rows" and is false for --limit 0, so the hint
-	// and the pagination key are both off for an unlimited request.
-	truncated := listing.HasMore
-
-	if in.jsonOut {
-		results := listing.Items
-		// Parity with the direct route: the pagination key is emitted only
-		// when truncated, and it carries the role's Total, which the role
-		// reads in the page's own snapshot and clamps to the rows it returned.
-		var pag *PaginationMeta
-		if truncated {
-			pag = &PaginationMeta{
-				Returned:  len(results),
-				Truncated: true,
-			}
-			if n := int(listing.Total); n > len(results) {
-				pag.Total = n
+	// The rendering is the direct route's, through the same function: one
+	// JSON shape, one pagination envelope, one "Showing X of N" hint. Only the
+	// text route's extras are read through this route's own plumbing, in a
+	// unit of work opened for them alone — and only if the text route asks.
+	var uw uow.UnitOfWork
+	openUW := func() uow.UnitOfWork {
+		if uw == nil {
+			if opened, uwErr := uowProvider.NewUOW(ctx); uwErr == nil {
+				uw = opened
+			} else {
+				debug.Logf("warning: open unit of work for ready rendering: %v", uwErr)
 			}
 		}
-		_ = outputJSONWithPagination(results, pag)
-		if truncated {
-			fmt.Fprintf(os.Stderr, "Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results))
+		return uw
+	}
+	defer func() {
+		if uw != nil {
+			uw.Close(ctx)
 		}
-		return nil
-	}
-
-	issues := make([]*types.Issue, 0, len(listing.Items))
-	for _, item := range listing.Items {
-		issues = append(issues, item.Issue)
-	}
-
-	maybeShowUpgradeNotification()
-
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
-
-	if len(issues) == 0 {
-		hasOpenIssues := false
-		if stats, statsErr := uw.IssueUseCase().GetStatistics(ctx); statsErr == nil {
-			hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
-		}
-		if hasOpenIssues {
-			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-				ui.RenderWarn("✨"))
-		} else {
-			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-		}
-		return nil
-	}
-
-	parentEpicMap := buildParentEpicMapProxied(ctx, uw, issues)
-	usePlain := in.plainFormat || !in.prettyFormat
-	if usePlain {
-		fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
-		for i, issue := range issues {
-			fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
-				ui.RenderPriority(issue.Priority),
-				ui.RenderType(string(issue.IssueType)),
-				ui.RenderID(issue.ID), issue.Title)
-			if issue.EstimatedMinutes != nil {
-				fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
+	}()
+	return renderReadyListing(listing, in, readyListingExtras{
+		hasOpenIssues: func() bool {
+			w := openUW()
+			if w == nil {
+				return false
 			}
-			if issue.Assignee != "" {
-				fmt.Printf("   Assignee: %s\n", issue.Assignee)
+			stats, statsErr := w.IssueUseCase().GetStatistics(ctx)
+			return statsErr == nil && (stats.OpenIssues > 0 || stats.InProgressIssues > 0)
+		},
+		parentEpics: func(issues []*types.Issue) map[string]string {
+			w := openUW()
+			if w == nil {
+				return nil
 			}
-		}
-		fmt.Println()
-	} else {
-		displayReadyList(issues, parentEpicMap)
-	}
-
-	if truncated {
-		fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.", len(issues))))
-	}
-	return nil
+			return buildParentEpicMapProxied(ctx, w, issues)
+		},
+	})
 }
 
 // proxiedReadyLister hands back the ready-listing surface for the

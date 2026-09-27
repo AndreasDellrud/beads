@@ -185,83 +185,119 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 			return HandleErrorRespectJSON("%v", err)
 		}
-		// HasMore is "the limit hid rows", read off the total in the same
-		// snapshot, so the published total can never be smaller than the page
-		// beside it.
-		truncated := listing.HasMore
-		totalReady := len(listing.Items)
-		if truncated {
-			totalReady = int(listing.Total)
-		}
-
-		if jsonOutput {
-			results := listing.Items
-			var pag *PaginationMeta
-			if truncated {
-				pag = &PaginationMeta{
-					Returned:  len(results),
-					Total:     totalReady,
-					Truncated: true,
-				}
-			}
-			if jerr := outputJSONWithPagination(results, pag); jerr != nil {
-				return jerr
-			}
-			if truncated {
-				fmt.Fprintf(os.Stderr, "Showing %d of %d ready issues. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results), totalReady)
-			}
-			return nil
-		}
-
-		issues := make([]*types.Issue, 0, len(listing.Items))
-		for _, item := range listing.Items {
-			issues = append(issues, item.Issue)
-		}
-		maybeShowUpgradeNotification()
-
-		if len(issues) == 0 {
-			hasOpenIssues := false
-			if stats, statsErr := activeStore.GetStatistics(ctx); statsErr == nil {
-				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
-			}
-			if hasOpenIssues {
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					ui.RenderWarn("✨"))
-			} else {
-				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-			}
-			maybeShowTip(store)
-			return nil
-		}
-		parentEpicMap := buildParentEpicMap(ctx, activeStore, issues)
-
-		usePlain := in.plainFormat || !in.prettyFormat
-		if usePlain {
-			fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
-			for i, issue := range issues {
-				fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
-					ui.RenderPriority(issue.Priority),
-					ui.RenderType(string(issue.IssueType)),
-					ui.RenderID(issue.ID), issue.Title)
-				if issue.EstimatedMinutes != nil {
-					fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
-				}
-				if issue.Assignee != "" {
-					fmt.Printf("   Assignee: %s\n", issue.Assignee)
-				}
-			}
-			fmt.Println()
-		} else {
-			displayReadyList(issues, parentEpicMap)
-		}
-
-		if truncated {
-			fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d of %d ready issues. Use -n to show more.", len(issues), totalReady)))
-		}
-
-		maybeShowTip(store)
-		return nil
+		return renderReadyListing(listing, in, readyListingExtras{
+			hasOpenIssues: func() bool {
+				stats, statsErr := activeStore.GetStatistics(ctx)
+				return statsErr == nil && (stats.OpenIssues > 0 || stats.InProgressIssues > 0)
+			},
+			parentEpics: func(issues []*types.Issue) map[string]string {
+				return buildParentEpicMap(ctx, activeStore, issues)
+			},
+			afterText: func() { maybeShowTip(store) },
+		})
 	},
+}
+
+// readyListingExtras are the pieces of `bd ready`'s TEXT rendering that are
+// not the listing's answer and that each route reads through its own plumbing
+// — the store on the direct route, a unit of work on the proxied one. The
+// --json rendering needs none of them.
+type readyListingExtras struct {
+	// hasOpenIssues picks the empty-state message: "all blocked" vs "no open
+	// issues". A failed read reports false, as both routes always have.
+	hasOpenIssues func() bool
+	// parentEpics maps a child ID to its parent epic's title for --pretty.
+	parentEpics func(issues []*types.Issue) map[string]string
+	// afterText runs after a text rendering (the direct route's tip). May be
+	// nil.
+	afterText func()
+}
+
+// renderReadyListing prints one ReadyLister answer the way `bd ready` prints
+// it, on BOTH routes: the direct route and the proxied route hand it the
+// listing their own ReadyLister returned, so the JSON shape, the pagination
+// envelope and the "Showing X of N" hint are one body rather than two that
+// agree by inspection.
+//
+// HasMore is "the limit hid rows", read off the total in the same snapshot by
+// the role (false for --limit 0), and the role clamps Total to at least
+// Offset+len(Items), so the published total is never smaller than the page
+// beside it.
+func renderReadyListing(listing issueops.ReadyListing, in readyInput, extras readyListingExtras) error {
+	truncated := listing.HasMore
+	totalReady := len(listing.Items)
+	if truncated {
+		totalReady = int(listing.Total)
+	}
+
+	if in.jsonOut {
+		results := listing.Items
+		var pag *PaginationMeta
+		if truncated {
+			pag = &PaginationMeta{
+				Returned:  len(results),
+				Total:     totalReady,
+				Truncated: true,
+			}
+		}
+		if jerr := outputJSONWithPagination(results, pag); jerr != nil {
+			return jerr
+		}
+		if truncated {
+			fmt.Fprintf(os.Stderr, "Showing %d of %d ready issues. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results), totalReady)
+		}
+		return nil
+	}
+
+	issues := make([]*types.Issue, 0, len(listing.Items))
+	for _, item := range listing.Items {
+		issues = append(issues, item.Issue)
+	}
+	maybeShowUpgradeNotification()
+
+	if len(issues) == 0 {
+		if extras.hasOpenIssues() {
+			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+				ui.RenderWarn("✨"))
+		} else {
+			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
+		}
+		if extras.afterText != nil {
+			extras.afterText()
+		}
+		return nil
+	}
+
+	// Read eagerly, as both routes always have, whichever rendering follows.
+	parentEpicMap := extras.parentEpics(issues)
+	usePlain := in.plainFormat || !in.prettyFormat
+	if usePlain {
+		fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
+		for i, issue := range issues {
+			fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
+				ui.RenderPriority(issue.Priority),
+				ui.RenderType(string(issue.IssueType)),
+				ui.RenderID(issue.ID), issue.Title)
+			if issue.EstimatedMinutes != nil {
+				fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
+			}
+			if issue.Assignee != "" {
+				fmt.Printf("   Assignee: %s\n", issue.Assignee)
+			}
+		}
+		fmt.Println()
+	} else {
+		displayReadyList(issues, parentEpicMap)
+	}
+
+	if truncated {
+		fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d of %d ready issues. Use -n to show more.", len(issues), totalReady)))
+	}
+
+	if extras.afterText != nil {
+		extras.afterText()
+	}
+	return nil
 }
 
 // readyGatedArm reports whether this `bd ready` invocation dispatches to the

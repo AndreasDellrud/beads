@@ -348,6 +348,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   purge that used to delete a closed molecule root under a live step now
   leaves it. See the `--wisps-plane` entry under Added.
 
+- **`bd ready --proxied-server` prints the same truncation hint as the direct
+  route, with the total.** A proxied listing cut short by `--limit` used to say
+  `Showing N ready issues; more matched but were hidden by --limit. Use --limit
+  0 for all, or --limit N to raise the cap.` on both stdout (text) and stderr
+  (`--json`), without saying how many matched. Both routes now list through
+  the `issueops.ReadyLister` role and render its answer with one function, so
+  the proxied route prints the direct route's wording: `Showing X of N ready
+  issues. Use -n to show more.` under the text renderings and `Showing X of N
+  ready issues. Use --limit 0 for all, or --limit N to raise the cap.` on
+  stderr under `--json`. JSON stdout is unchanged — the pagination envelope
+  already carried `total` — and so is every untruncated listing, including
+  gc's `bd ready --json --include-ephemeral --limit 0` (a plain array). The
+  proxied listing's page and total now come from one read-only unit of work
+  instead of two.
+
 - **`bd ready`'s direct listing is one read in every output mode, and its
   directory-label scope is normalized.** The listing now goes through the
   `issueops.ReadyLister` role, which returns the page and the size of the

@@ -96,3 +96,48 @@ func TestProxiedReadyGoldenOutput(t *testing.T) {
 		})
 	}
 }
+
+// TestReadyGoldenRoutesAgree holds the two routes' goldens to ONE output: for
+// every invocation both golden sets pin over the shared seed, the proxied
+// route's bytes must equal the direct route's — the JSON shape, the pagination
+// envelope and its total, and the "Showing X of N" hint on either stream. The
+// --max-rows refusal is the one deliberate difference (the proxied route
+// cannot enforce the cap and refuses it outright), so it is excluded by name.
+//
+// It reads files only, so it runs in every lane; the two golden tests above
+// are what keep the files honest.
+func TestReadyGoldenRoutesAgree(t *testing.T) {
+	routeSpecific := map[string]bool{
+		"text_max_rows_refused.golden": true,
+		"json_max_rows_refused.golden": true,
+	}
+	direct, err := filepath.Glob(filepath.Join("testdata", "ready_golden", "*.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compared := 0
+	for _, path := range direct {
+		name := filepath.Base(path)
+		if routeSpecific[name] {
+			continue
+		}
+		proxied, err := os.ReadFile(filepath.Join("testdata", "ready_golden_proxied", name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compared++
+		if !bytes.Equal(proxied, want) {
+			t.Errorf("%s: the proxied route prints differently from the direct route.\n--- proxied\n%s\n--- direct\n%s", name, proxied, want)
+		}
+	}
+	if compared < 10 {
+		t.Errorf("compared only %d shared goldens; the two sets have drifted apart", compared)
+	}
+}
