@@ -145,6 +145,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both of `bd serve`'s arms: the store arm no longer refuses a claim-by-id of
   an issue whose only blocker is LOCAL, matching the provider arm and the CLI.
 
+- **Direct `bd close` no longer closes work an unsatisfied `external:`
+  dependency holds back.** On the direct (embedded / store) route the close
+  went past the external-dependency policy: `bd close X` exited 0 with
+  `✓ Closed X`. It now exits 1 with `cannot close blocked issue X ... (use
+  --force to override)`, naming the blocker and writing nothing for X, as the
+  `--proxied-server` route and `bd update --status closed` already did;
+  `--force` still closes it, and re-closing already-closed work stays the
+  idempotent no-op. The same gap let `bd close --claim-next` hand out
+  externally blocked work as the next claim; it now skips it. `bd serve`'s
+  store arm (`POST /v0/beads/issues:batchClose`) had both holes too: it now
+  refuses such an item at its own index unless the request sends `force`
+  (the other items still close together) and never claims one for
+  `claim_next`.
+
 - **`bd list --watch --format` is refused instead of silently dropping the
   format** ([#6277](https://github.com/gastownhall/beads/issues/6277)).
   `--watch` always re-renders the pretty listing, so on the direct route a
@@ -402,6 +416,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `blocks` is no longer purged (reported as `live_dependent_skipped`), so a
   purge that used to delete a closed molecule root under a live step now
   leaves it. See the `--wisps-plane` entry under Added.
+
+- **Re-running `bd update --claim` on work you already hold is refused if an
+  `external:` blocker was added after you claimed it.** The claim guard that
+  now covers `bd update --claim` (see Fixed) runs on every claim, including
+  the same actor re-claiming its own in-progress issue, which used to be an
+  idempotent success. Once an unsatisfied `external:<project>:<capability>`
+  edge lands on that issue, the repeat claim exits nonzero naming the blocker;
+  the issue stays in progress and assigned to you. Nothing about the first
+  claim changes.
 
 - **`bd ready --proxied-server` prints the same truncation hint as the direct
   route, with the total.** A proxied listing cut short by `--limit` used to say
