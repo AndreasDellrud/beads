@@ -112,6 +112,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in_progress on both the direct and the `--proxied-server` route. It is now
   skipped (the next ready step, if any, is claimed instead).
 
+- **`bd close --continue` no longer suggests claiming a step `bd update
+  --claim` would refuse.** When the external-dependency guard held the next
+  ready step, the output still said `Start with: bd update <step> --claim`
+  (with or without `--no-auto`). It now names the first ready step the guard
+  does not refuse; when it refuses every one, it prints `No claimable steps in
+  molecule: every ready step (<ids>) is held by an unsatisfied external
+  dependency.` and no claim hint, and `--json` omits `next_step`. Both the
+  direct and the `--proxied-server` route.
+
 - **`bd serve`'s `POST /v0/beads/issues:batchApply` no longer closes work an
   unsatisfied `external:` dependency holds back.** On the store arm the
   applier bypassed the external-dependency policy entirely; on the provider
