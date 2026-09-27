@@ -1215,3 +1215,9 @@ exports_files(
     ],
     visibility = ["//internal/httpapi:__pkg__"],
 )
+
+# Init-safety help text pinned by //test/docsync recovery-doc tests.
+exports_files(
+    ["init_safety_help.go"],
+    visibility = ["//test/docsync:__pkg__"],
+)

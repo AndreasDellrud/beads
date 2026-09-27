@@ -9,6 +9,7 @@ go_test(
     ],
     data = [
         "//:docsync_files",
+        "//cmd/bd:init_safety_help.go",
         "//internal/testutil:testdoltcommon.go",
     ],
     deps = ["//internal/testutil/bazeltest"],
