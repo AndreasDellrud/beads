@@ -21,6 +21,26 @@ import (
 //
 // Validation runs first and without IO, so a request the role would refuse
 // costs no edge read.
+//
+// THE EXCLUSIONS ARE READ BEFORE THE ROLE'S OWN TRANSACTION, not inside it, and
+// that is a documented trade rather than an oversight. On the store arm there
+// is no choice: storage.DoltStorage publishes no transaction a wrapper could
+// share. On the unit-of-work arm the read is one read-only unit of work of the
+// undecorated provider, and the claim, count or listing then runs in its own.
+// Reading them INSIDE the role's transaction would mean running the inner role
+// over the policy provider, whose use-case overrides would then apply the
+// policy a second time — the double application this wrapper exists to avoid.
+// It would also buy little: the other half of the verdict, whether a FOREIGN
+// project has shipped the capability, lives in another database that no local
+// transaction can pin, so the policy was never atomic with a claim.
+//
+// The window this leaves is narrow and named: an `external:` edge committed,
+// or a foreign capability withdrawn, between the two transactions is not seen
+// by that one call, which answers as of the read. Callers that need the check
+// inside their own transaction have it — the use-case overrides on the
+// unit-of-work arm (issueUseCase in uow_decorator.go) read the edges in the
+// caller's unit of work, which is why claim-by-id and the lifecycle's close
+// are built over the policy provider rather than wrapped here.
 
 // readyPolicy binds the policy to the edge source of one seam, and to that
 // seam's way of asking whether an issue is already closed.
