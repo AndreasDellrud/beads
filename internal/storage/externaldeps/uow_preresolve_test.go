@@ -47,19 +47,27 @@ func (u *openCountingUOW) Close(ctx context.Context) {
 	}
 }
 
-// edgesAfterFirstRead answers no external edges on its first read and the
-// configured ones afterwards: an edge committed between a mutation's
-// pre-resolution and its write transaction.
+// edgesAfterFirstRead answers no edges on its first read of the target's own
+// records and the configured ones afterwards: an edge committed between a
+// mutation's pre-resolution and its write transaction. A guard on one issue
+// reads only that issue's edges, so a read of the whole workspace's is counted
+// separately and must not happen.
 type edgesAfterFirstRead struct {
 	*fakeDependencyUseCase
-	reads int
+	reads          int
+	workspaceReads int
 }
 
-func (d *edgesAfterFirstRead) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+func (d *edgesAfterFirstRead) GetIssueDependencyRecords(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
 	d.reads++
 	if d.reads == 1 {
 		return map[string][]*types.Dependency{}, nil
 	}
+	return d.fakeDependencyUseCase.GetIssueDependencyRecords(ctx, ids)
+}
+
+func (d *edgesAfterFirstRead) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	d.workspaceReads++
 	return d.fakeDependencyUseCase.GetExternalBlockingDependencyRecords(ctx)
 }
 
@@ -147,6 +155,79 @@ func TestGuardedClaimFailsClosedOnAnEdgeResolutionDidNotSee(t *testing.T) {
 		t.Fatalf("%s was claimed past an edge the transaction saw", target.ID)
 	}
 	if deps.reads != 2 {
-		t.Errorf("edge reads = %d, want 2 (pre-resolution, then the transaction's own)", deps.reads)
+		t.Errorf("reads of the claimed issue's edges = %d, want 2 (pre-resolution, then the transaction's own)", deps.reads)
+	}
+	if deps.workspaceReads != 0 {
+		t.Errorf("a single-id claim read the whole workspace's external edges %d times, want 0", deps.workspaceReads)
+	}
+}
+
+// TestSingleIDGuardsReadOnlyTheTargetsEdges pins the unit-of-work arm's
+// single-id guards — the claim-by-id role, the lifecycle's claim and close,
+// and a PreResolve'd step claim — to the target's OWN edges: the
+// pre-resolution and the in-transaction check each read that issue's records,
+// and neither reads the whole workspace's external edges, which each
+// used to scan for one id.
+func TestSingleIDGuardsReadOnlyTheTargetsEdges(t *testing.T) {
+	blocked := issue("be-blocked")
+	deps := &countingDependencyUseCase{fakeDependencyUseCase: &fakeDependencyUseCase{external: map[string][]*types.Dependency{
+		blocked.ID: {externalDep(blocked.ID, "external:remote:payments", types.DepBlocks)},
+		"be-other": {externalDep("be-other", "external:remote:other", types.DepBlocks)},
+	}}}
+	inner := &fakeUOW{issues: &fakeIssueUseCase{ready: []*types.Issue{blocked}}, deps: deps}
+	provider := WrapUOWProvider(&openCountingProvider{uw: inner}, func(ProjectName) (string, bool) { return "", false }, nil)
+	ctx := t.Context()
+
+	claimer, err := provider.(uow.IssueClaimerSource).IssueClaimer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := provider.(uow.IssueLifecycleSource).IssueLifecycle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		run  func() error
+		want error
+	}{
+		{"Claim", func() error {
+			_, err := claimer.Claim(ctx, publicops.ClaimRequest{IssueID: blocked.ID, Actor: "w"})
+			return err
+		}, storage.ErrClaimBlocked},
+		{"Update(Claim)", func() error {
+			_, err := lifecycle.Update(ctx, publicops.UpdateRequest{IssueID: blocked.ID, Actor: "w", Claim: true})
+			return err
+		}, storage.ErrClaimBlocked},
+		{"Close", func() error {
+			_, err := lifecycle.Close(ctx, publicops.CloseRequest{IssueID: blocked.ID, Actor: "w"})
+			return err
+		}, storage.ErrCloseBlocked},
+		{"PreResolve + ClaimIssueIfOpen", func() error {
+			prepared, err := PreResolve(ctx, provider, blocked.ID)
+			if err != nil {
+				return err
+			}
+			uw, err := prepared.NewUOW(ctx)
+			if err != nil {
+				return err
+			}
+			defer uw.Close(ctx)
+			_, err = uw.IssueUseCase().ClaimIssueIfOpen(ctx, blocked.ID, "w")
+			return err
+		}, storage.ErrClaimBlocked},
+	} {
+		deps.reads, deps.ownReads = 0, 0
+		if err := tc.run(); !errors.Is(err, tc.want) {
+			t.Fatalf("%s of externally blocked %s: err = %v, want %v", tc.name, blocked.ID, err, tc.want)
+		}
+		if deps.reads != 0 {
+			t.Errorf("%s read the whole workspace's external edges %d times, want 0", tc.name, deps.reads)
+		}
+		// At least the pre-resolution and the transaction's check; the
+		// lifecycle's pre-image hydration reads the same records once more.
+		if deps.ownReads < 2 {
+			t.Errorf("%s read the target's own edges %d times, want at least 2 (pre-resolution, then the transaction's check)", tc.name, deps.ownReads)
+		}
 	}
 }

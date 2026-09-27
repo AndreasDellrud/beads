@@ -43,8 +43,8 @@ type uowProvider struct {
 // the transaction) across foreign IO, once more on every RunTxResult retry — on
 // bd serve, a handful of concurrent claims against a slow foreign project could
 // drain the pool. So the guarded roles resolve first, in no transaction, and
-// the check inside the transaction only re-reads this workspace's own edges
-// (one indexed query, no foreign IO) and looks each ref up here.
+// the check inside the transaction only re-reads the target's own edges (one
+// indexed query, no foreign IO) and looks each ref up here.
 //
 // A ref the transaction sees that is NOT in satisfied — an edge committed
 // after the resolution — counts as unsatisfied: the policy fails closed, and
@@ -54,10 +54,11 @@ type preResolved struct {
 }
 
 // resolveFor resolves the external refs ids carry now: one read-only unit of
-// work of the undecorated provider for the edges, then the foreign lookups
-// with no transaction open. An id with no external edge costs no foreign IO.
+// work of the undecorated provider for ids' OWN edges (never the whole
+// workspace's), then the foreign lookups with no transaction open. An id with
+// no external edge costs no foreign IO.
 func (p *uowProvider) resolveFor(ctx context.Context, ids ...string) (*preResolved, error) {
-	edges, err := p.externalEdges(ctx)
+	edges, err := p.ownEdges(ctx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: list blocking records: %w", err)
 	}
@@ -607,9 +608,9 @@ type issueUseCase struct {
 // blockersOf returns the unsatisfied external refs holding id back, read in
 // THIS unit of work.
 //
-// With a pre-resolved verdict (a guarded role's call) it re-reads only this
-// workspace's edges — one indexed query, no foreign IO inside the write
-// transaction — and looks each of id's refs up in it; a ref the resolution did
+// With a pre-resolved verdict (a guarded role's call) it re-reads only id's
+// own edges — one indexed query, no foreign IO inside the write transaction —
+// and looks each of id's refs up in it; a ref the resolution did
 // not see fails closed. Without one (a raw-UOW caller) it resolves id's own
 // refs in place — never another issue's — which is the only answer available
 // to a caller that opened the transaction itself.
@@ -621,7 +622,7 @@ func (u *issueUseCase) blockersOf(ctx context.Context, id string) ([]string, err
 		}
 		return refs[id], nil
 	}
-	edges, err := u.deps.GetExternalBlockingDependencyRecords(ctx)
+	edges, err := u.deps.GetIssueDependencyRecords(ctx, []string{id})
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: list blocking records: %w", err)
 	}
