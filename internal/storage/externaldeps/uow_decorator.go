@@ -703,7 +703,7 @@ func (u *issueUseCase) guardExternalClaim(ctx context.Context, id string) error 
 		return err
 	}
 	if len(blockers) > 0 {
-		return externallyBlocked(id, blockers)
+		return externallyBlockedClaim(id, blockers)
 	}
 	return nil
 }

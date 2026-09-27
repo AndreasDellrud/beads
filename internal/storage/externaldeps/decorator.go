@@ -177,17 +177,46 @@ func (l *lifecycle) Reopen(ctx context.Context, request publicops.ReopenRequest)
 }
 
 // guardExternalClaim refuses claiming id while an unsatisfied external blocker
-// holds it back. The store arm has no transaction to share with the claim, so
-// this reads as of the call, like every other store-arm guard.
+// holds it back — the SAME set the unit-of-work arm refuses: external blockers
+// only. A local blocker does not refuse a claim-by-id on either arm, as it
+// never has on the unpoliced backend. The store arm has no transaction to
+// share with the claim, so this reads as of the call, like every other
+// store-arm guard; it resolves only id's own refs.
 func (s *Store) guardExternalClaim(ctx context.Context, id string) error {
-	state, err := s.loadBlockingState(ctx)
+	blockers, err := s.externalBlockersOf(ctx, id)
 	if err != nil {
 		return err
 	}
-	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
-		return externallyBlocked(id, blockers)
+	if len(blockers) > 0 {
+		return externallyBlockedClaim(id, blockers)
 	}
 	return nil
+}
+
+// externalBlockersOf returns id's unsatisfied external refs, reading and
+// resolving only id's own edges.
+func (s *Store) externalBlockersOf(ctx context.Context, id string) ([]string, error) {
+	deps, err := s.inner.GetDependencyRecordsForIssues(ctx, []string{id})
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]reference, 0)
+	for _, dep := range deps[id] {
+		if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
+			refs = append(refs, parseReference(dep.DependsOnID))
+		}
+	}
+	satisfied, err := s.resolveReferences(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	var blockers []string
+	for _, ref := range refs {
+		if !satisfied[ref.raw] {
+			blockers = appendUnique(blockers, ref.raw)
+		}
+	}
+	return blockers, nil
 }
 
 func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) error {
@@ -484,26 +513,14 @@ func (s *Store) IsBlocked(ctx context.Context, issueID string) (bool, []string, 
 	if err != nil {
 		return false, nil, err
 	}
-	deps, err := s.inner.GetDependencyRecordsForIssues(ctx, []string{issueID})
+	external, err := s.externalBlockersOf(ctx, issueID)
 	if err != nil {
 		return false, nil, err
 	}
-	refs := make([]reference, 0)
-	for _, dep := range deps[issueID] {
-		if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
-			refs = append(refs, parseReference(dep.DependsOnID))
-		}
+	for _, ref := range external {
+		blockers = appendUnique(blockers, ref)
 	}
-	satisfied, err := s.resolveReferences(ctx, refs)
-	if err != nil {
-		return false, nil, err
-	}
-	for _, ref := range refs {
-		if !satisfied[ref.raw] {
-			blockers = appendUnique(blockers, ref.raw)
-		}
-	}
-	return blocked || len(blockers) > 0, blockers, nil
+	return blocked || len(external) > 0, blockers, nil
 }
 
 // IsBlockedBatch preserves the external blocker invariant for batch callers.

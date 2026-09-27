@@ -96,7 +96,7 @@ func TestGuardedMutationsResolveForeignProjectsOutsideTheWriteTransaction(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := claimer.Claim(ctx, publicops.ClaimRequest{IssueID: blocked.ID, Actor: "w"}); !errors.Is(err, storage.ErrCloseBlocked) {
+	if _, err := claimer.Claim(ctx, publicops.ClaimRequest{IssueID: blocked.ID, Actor: "w"}); !errors.Is(err, storage.ErrClaimBlocked) {
 		t.Fatalf("claim of %s (unsatisfied): err = %v, want the external refusal", blocked.ID, err)
 	}
 	if _, err := claimer.Claim(ctx, publicops.ClaimRequest{IssueID: provided.ID, Actor: "w"}); err != nil {
@@ -107,7 +107,7 @@ func TestGuardedMutationsResolveForeignProjectsOutsideTheWriteTransaction(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lifecycle.Update(ctx, publicops.UpdateRequest{IssueID: blocked.ID, Actor: "w", Claim: true}); !errors.Is(err, storage.ErrCloseBlocked) {
+	if _, err := lifecycle.Update(ctx, publicops.UpdateRequest{IssueID: blocked.ID, Actor: "w", Claim: true}); !errors.Is(err, storage.ErrClaimBlocked) {
 		t.Fatalf("Update(Claim) of %s: err = %v, want the external refusal", blocked.ID, err)
 	}
 	if _, err := lifecycle.Close(ctx, publicops.CloseRequest{IssueID: blocked.ID, Actor: "w"}); !errors.Is(err, storage.ErrCloseBlocked) {
@@ -140,7 +140,7 @@ func TestGuardedClaimFailsClosedOnAnEdgeResolutionDidNotSee(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := claimer.Claim(t.Context(), publicops.ClaimRequest{IssueID: target.ID, Actor: "w"}); !errors.Is(err, storage.ErrCloseBlocked) {
+	if _, err := claimer.Claim(t.Context(), publicops.ClaimRequest{IssueID: target.ID, Actor: "w"}); !errors.Is(err, storage.ErrClaimBlocked) {
 		t.Fatalf("claim with a late edge: err = %v, want the external refusal", err)
 	}
 	if target.Assignee != "" {

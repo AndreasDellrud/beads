@@ -294,10 +294,18 @@ func (c *policyBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBa
 	return issueops.CloseBatchResult{Outcomes: outcomes, ClaimedNext: result.ClaimedNext}, nil
 }
 
-// externallyBlocked is the refusal every guard in this package returns, in
-// the typed close vocabulary callers already classify with errors.Is.
+// externallyBlocked is the refusal every CLOSE guard in this package returns,
+// in the typed close vocabulary callers already classify with errors.Is.
 func externallyBlocked(id string, blockers []string) error {
 	return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+}
+
+// externallyBlockedClaim is the refusal every CLAIM guard in this package
+// returns: ErrClaimBlocked, which wraps ErrNotClaimable. It used to be the
+// close refusal, so a served claim answered `not_closable` with "close with
+// force" advice for an operation that has neither a close nor a force.
+func externallyBlockedClaim(id string, blockers []string) error {
+	return fmt.Errorf("%w: %s is blocked by %v", storage.ErrClaimBlocked, id, blockers)
 }
 
 var (

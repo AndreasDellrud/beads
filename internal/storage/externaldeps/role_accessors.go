@@ -2,9 +2,7 @@ package externaldeps
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi/storereader"
 	"github.com/steveyegge/beads/issueops"
@@ -70,6 +68,11 @@ func (s *Store) issueClosed(ctx context.Context, id string) (bool, error) {
 // IssueClaimer rejects a direct claim of externally blocked work before the
 // backend's atomic claim operation. ReadyClaimer below handles selection among
 // candidates; this method covers callers that already name an issue.
+//
+// It refuses EXTERNAL blockers only (guardExternalClaim), the same set the
+// unit-of-work arm refuses. It used to ask IsBlocked, which also counts LOCAL
+// blockers, so serve's store arm refused a claim-by-id of a locally blocked
+// issue that its provider arm, the CLI and the unpoliced backend all allow.
 func (s *Store) IssueClaimer() (issueops.Claimer, error) {
 	inner, err := s.inner.IssueClaimer()
 	if err != nil {
@@ -84,12 +87,8 @@ type issueClaimer struct {
 }
 
 func (c *issueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (issueops.ClaimResult, error) {
-	blocked, blockers, err := c.policy.IsBlocked(ctx, req.IssueID)
-	if err != nil {
+	if err := c.policy.guardExternalClaim(ctx, req.IssueID); err != nil {
 		return issueops.ClaimResult{}, err
-	}
-	if blocked {
-		return issueops.ClaimResult{}, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, req.IssueID, blockers)
 	}
 	return c.inner.Claim(ctx, req)
 }

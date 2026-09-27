@@ -25,6 +25,7 @@ import (
 var (
 	ErrAlreadyClaimed    = issueops.ErrAlreadyClaimed
 	ErrNotClaimable      = issueops.ErrNotClaimable
+	ErrClaimBlocked      = issueops.ErrClaimBlocked
 	ErrAssigneeMismatch  = issueops.ErrAssigneeMismatch
 	ErrNotFound          = issueops.ErrNotFound
 	ErrValidation        = issueops.ErrValidation

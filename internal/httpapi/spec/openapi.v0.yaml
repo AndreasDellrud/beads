@@ -2675,6 +2675,14 @@ paths:
         `assignee` extension member, read inside the same transaction; an issue
         in a non-claimable state is 409 `not_claimable` and carries
         `issue_status`. Neither needs the client to parse prose.
+
+
+        An issue held back by an unsatisfied `external:<project>:<capability>`
+        dependency (see the `policy.external_dependencies` capability) is also
+        409 `not_claimable`, WITHOUT `issue_status` — its status is claimable;
+        the dependency is what refuses. There is no bypass: the blocker has to
+        be satisfied first. A LOCAL blocking dependency does not refuse a
+        claim-by-id.
       parameters:
         - $ref: '#/components/parameters/IssueID'
       security:
@@ -2710,8 +2718,10 @@ paths:
         '409':
           description: >-
             The issue is held by another actor (`already_claimed`, with the
-            `assignee` extension member) or is not in a claimable state
-            (`not_claimable`, with the `issue_status` extension member).
+            `assignee` extension member), is not in a claimable state
+            (`not_claimable`, with the `issue_status` extension member), or is
+            held back by an unsatisfied `external:` dependency
+            (`not_claimable`, without `issue_status`).
           x-bd-codes: [already_claimed, not_claimable]
           content:
             application/problem+json:

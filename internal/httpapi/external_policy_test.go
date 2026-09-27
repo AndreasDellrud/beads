@@ -145,6 +145,12 @@ func TestServedClaimRefusesExternallyBlockedWork(t *testing.T) {
 	if n := len(issues.claimed()); n != 0 {
 		t.Fatalf("the compare-and-set ran %d times for an externally blocked issue, want 0", n)
 	}
+	// A claim refusal, not a close one: 409 not_claimable with a detail about
+	// the blocker, never not_closable's "close with force" advice.
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, `"code":"not_claimable"`) ||
+		!strings.Contains(body, "blocked by an unsatisfied dependency") || strings.Contains(body, "force") {
+		t.Errorf("served refusal = %d %s, want 409 not_claimable naming the blocker", resp.StatusCode, body)
+	}
 	if reads != 2 {
 		t.Errorf("the request read the external edges %d times, want exactly 2 (pre-resolution, then in the claim's transaction)", reads)
 	}
