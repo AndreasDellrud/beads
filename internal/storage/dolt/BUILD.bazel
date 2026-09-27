@@ -326,6 +326,12 @@ go_test(
         "wisps_cycle_test.go",
         "workspace_config_contract_test.go",
     ],
+    # Source-scan guards (journal/version scope completeness, helper sentinel
+    # census) parse this package and ../issueops at test time.
+    data = [
+        ":go_srcs",
+        "//internal/storage/issueops:go_srcs",
+    ],
     embed = [":dolt"],
     deps = [
         "//backend/conformance",
