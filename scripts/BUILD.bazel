@@ -1,5 +1,16 @@
 load("@rules_go//go:def.bzl", "go_test")
 
+# CI and repo-policy tests: they parse the workflows and run the CI shell
+# scripts against fixtures.
+#
+# Tags:
+#   host-tools: the scripts and fixtures run the host's git, python3, awk,
+#     sed, find, grep and timeout (beyond the bash the test wrapper needs),
+#     and several subtests t.Skip when git is missing.
+#   no-remote-exec: so they always run where that inventory is known (the
+#     developer machine or the CI runner) rather than silently skipping on a
+#     worker without it. The farm workers do have these tools today (the
+#     target passes there), so this can be dropped once that is guaranteed.
 go_test(
     name = "scripts_test",
     srcs = [
@@ -17,12 +28,16 @@ go_test(
         "test_script_test.go",
     ],
     data = [
-        "ci/install-dolt.sh",
-        "ci/pull-dolt-image.sh",
+        ":scripts_files",
         "//:bazel_policy_files",
+        "//:test_sh_files",
         "//:workflow_files",
         "//internal/testutil:testdoltcommon.go",
         "//tools/bazel:dolt.bzl",
+    ],
+    tags = [
+        "host-tools",
+        "no-remote-exec",
     ],
     deps = [
         "//internal/formula",
@@ -31,9 +46,28 @@ go_test(
     ],
 )
 
+# The scripts scripts_test reads and runs (CI helpers, check-*.sh, release.sh,
+# test.sh, conformance.sh, ...). Globs stop at subpackages, so this is only
+# this package's own tree.
+filegroup(
+    name = "scripts_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "BUILD.bazel",
+            "**/*_test.go",
+        ],
+    ),
+)
+
 exports_files(
     ["migration-test/release-catalog.json"],
     visibility = ["//scripts/migration-test/catalog:__pkg__"],
+)
+
+exports_files(
+    ["ci/fmt-check.sh"],
+    visibility = ["//scripts/prlintmake:__pkg__"],
 )
 
 exports_files(

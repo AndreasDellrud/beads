@@ -33,6 +33,16 @@ test:prcore --test_tag_filters=-requires-docker,-embedded,-manual
 test:ci --config=prcore
 test:ci --keep_going --test_summary=terse
 
+# Docker lane: only the requires-docker targets (pr.yml's container-backed
+# jobs), on a host with a docker daemon. Race like those jobs, but no -short
+# and no BEADS_TEST_SKIP=dolt, which would keep the containers from starting.
+# Those targets are also tagged no-remote-exec, so they run on the host even
+# with --config=remote-exec.
+test:docker --@rules_go//go/config:race
+test:docker --test_tag_filters=requires-docker
+test:docker --build_tests_only
+test:docker --keep_going
+
 # Remote execution against any REAPI-compatible service. Only generic tuning
 # lives here; the executor endpoint and TLS credentials are never committed.
 # Developers put them in a gitignored user.bazelrc or .bazelrc.local; CI writes
