@@ -29,6 +29,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 const windowsOS = "windows"
@@ -315,14 +316,12 @@ var (
 	initTestBDErr  error
 )
 
+// findPrebuiltBDBinary returns the absolute path of the BEADS_TEST_BD_BINARY
+// binary, or "" when none is configured and the caller should `go build` bd.
+// Under Bazel the binary is always injected (//cmd/bd:bd_for_tests) and is
+// resolved through runfiles; see bazeltest.PrebuiltBD.
 func findPrebuiltBDBinary() (string, error) {
-	if configured := os.Getenv("BEADS_TEST_BD_BINARY"); configured != "" {
-		if _, err := os.Stat(configured); err != nil {
-			return "", fmt.Errorf("BEADS_TEST_BD_BINARY %q is not usable: %w", configured, err)
-		}
-		return filepath.Abs(configured)
-	}
-	return "", nil
+	return bazeltest.PrebuiltBD()
 }
 
 // buildBDForInitTests builds (or locates) a bd binary suitable for subprocess

@@ -149,8 +149,12 @@ go_test(
         "version_reconciler_contract_test.go",
         "workspace_config_contract_test.go",
     ],
-    data = [":go_srcs"],
+    data = [
+        ":go_srcs",
+        "//cmd/bd:bd_for_tests",
+    ],
     embed = [":uow"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
     deps = [
         "//backend/conformance",
         "//internal/configfile",
@@ -167,6 +171,7 @@ go_test(
         "//internal/storage/issueops",
         "//internal/storage/schema",
         "//internal/testutil",
+        "//internal/testutil/bazeltest",
         "//internal/types",
         "//internal/workapi",
         "//internal/workapi/storereader",

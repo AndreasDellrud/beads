@@ -40,10 +40,12 @@ go_test(
         "versioning_contract_test.go",
         "wp4_helpers_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(["testdata/**"]) + ["//cmd/bd:bd_for_tests"],
     embed = [":protocol"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
     deps = [
         "//internal/storage/schema",
         "//internal/testutil",
+        "//internal/testutil/bazeltest",
     ],
 )

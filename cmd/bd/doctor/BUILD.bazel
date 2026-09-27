@@ -146,7 +146,9 @@ go_test(
         "validation_test.go",
         "version_test.go",
     ],
+    data = ["//cmd/bd:bd_for_tests"],
     embed = [":doctor"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
     deps = [
         "//internal/beads",
         "//internal/configfile",
@@ -157,6 +159,7 @@ go_test(
         "//internal/storage/embeddeddolt",
         "//internal/storage/issueops",
         "//internal/testutil",
+        "//internal/testutil/bazeltest",
         "//internal/types",
         "//internal/utils",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",

@@ -35,11 +35,12 @@ var (
 func buildEmbeddedBD(t *testing.T) string {
 	t.Helper()
 	embeddedBDOnce.Do(func() {
-		if prebuilt := os.Getenv("BEADS_TEST_BD_BINARY"); prebuilt != "" {
-			if _, err := os.Stat(prebuilt); err != nil {
-				embeddedBDErr = fmt.Errorf("BEADS_TEST_BD_BINARY=%q not found: %w", prebuilt, err)
-				return
-			}
+		prebuilt, err := findPrebuiltBDBinary()
+		if err != nil {
+			embeddedBDErr = err
+			return
+		}
+		if prebuilt != "" {
 			embeddedBD = prebuilt
 			return
 		}

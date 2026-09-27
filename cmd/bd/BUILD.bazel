@@ -455,6 +455,23 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# The bd that subprocess tests exec, injected through BEADS_TEST_BD_BINARY
+# (bazeltest.PrebuiltBD) instead of a per-package `go build`. Never race
+# instrumented, even under --config=prcore: it matches the non-race
+# gms_pure_go binary pr-core's tests build today. Named bd, like that binary.
+go_binary(
+    name = "bd_for_tests",
+    out = "bd_for_tests/bd",
+    embed = [":bd_lib"],
+    race = "off",
+    visibility = [
+        "//cmd/bd:__subpackages__",
+        "//internal/beads:__pkg__",
+        "//internal/storage/uow:__pkg__",
+        "//test/conformance:__pkg__",
+    ],
+)
+
 go_test(
     name = "bd_test",
     # -race -short runs ~10 min (pr-core gives go test -timeout=30m).
@@ -1097,8 +1114,9 @@ go_test(
         "write_verbs_parity_test.go",
         "zz_stdio_leak_guard_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(["testdata/**"]) + [":bd_for_tests"],
     embed = [":bd_lib"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)"},
     deps = [
         "//:beads",
         "//cmd/bd/doctor",
@@ -1146,6 +1164,7 @@ go_test(
         "//internal/storage/versioncontrolops",
         "//internal/telemetry",
         "//internal/testutil",
+        "//internal/testutil/bazeltest",
         "//internal/tracker",
         "//internal/types",
         "//internal/ui",
