@@ -123,10 +123,13 @@ func (u *fakeDependencyUseCase) GetExternalBlockingDependencyRecords(context.Con
 	return u.external, nil
 }
 
+// GetIssueDependencyRecords answers from both planes, as the real query does
+// (GetDependencyRecordsForIssuesInTx partitions ids into wisps and issues):
+// an id's records are its non-external ones plus its external blocking edges.
 func (u *fakeDependencyUseCase) GetIssueDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
 	result := make(map[string][]*types.Dependency, len(ids))
 	for _, id := range ids {
-		result[id] = u.records[id]
+		result[id] = append(append(slices.Clone(u.records[id]), u.external[id]...), u.wispDeps[id]...)
 	}
 	return result, nil
 }

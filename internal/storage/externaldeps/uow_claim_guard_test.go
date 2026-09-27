@@ -61,8 +61,8 @@ func TestUOWIssueClaimerRefusesExternallyBlockedWork(t *testing.T) {
 
 // TestUOWRawClaimIssueRefusesExternallyBlockedWork drives the override with no
 // role in between — the path a raw-UOW caller, and any role built over this
-// provider, reaches — and pins that it reads the edges once, in the claim's
-// own unit of work.
+// provider, reaches — and pins that it reads only the claimed issue's own
+// edges, once, in the claim's own unit of work: never the workspace's.
 func TestUOWRawClaimIssueRefusesExternallyBlockedWork(t *testing.T) {
 	blocked := issue("be-blocked")
 	deps := &countingDependencyUseCase{fakeDependencyUseCase: &fakeDependencyUseCase{external: map[string][]*types.Dependency{
@@ -80,7 +80,10 @@ func TestUOWRawClaimIssueRefusesExternallyBlockedWork(t *testing.T) {
 	if blocked.Assignee != "" {
 		t.Fatalf("externally blocked %s was claimed by %q", blocked.ID, blocked.Assignee)
 	}
-	assertReads(t, "ClaimIssue", deps, 1)
+	if deps.ownReads != 1 {
+		t.Errorf("ClaimIssue read the claimed issue's own edges %d times, want 1", deps.ownReads)
+	}
+	assertReads(t, "ClaimIssue", deps, 0)
 }
 
 // TestUpdateClaimRefusesExternallyBlockedWorkOnBothArms pins `bd update

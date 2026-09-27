@@ -131,6 +131,13 @@ func TestUOWReadyRolesApplyThePolicyOnce(t *testing.T) {
 type countingDependencyUseCase struct {
 	*fakeDependencyUseCase
 	reads int
+	// ownReads counts reads of named issues' edges (GetIssueDependencyRecords).
+	ownReads int
+}
+
+func (c *countingDependencyUseCase) GetIssueDependencyRecords(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	c.ownReads++
+	return c.fakeDependencyUseCase.GetIssueDependencyRecords(ctx, ids)
 }
 
 func (c *countingDependencyUseCase) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {

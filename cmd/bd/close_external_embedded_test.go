@@ -157,3 +157,55 @@ func TestEmbeddedExternalCapabilityGuardsContinueStepClaim(t *testing.T) {
 		t.Errorf("--continue did not advance to the unblocked step %s (status=%s)", free.ID, got.Status)
 	}
 }
+
+// TestEmbeddedCloseIgnoresUnrelatedExternalEdges pins the direct close route
+// to the closed issue's OWN `external:` edges: another issue's edge to a
+// project that is not configured used to be resolved on every `bd close`, so
+// closing unrelated work printed `Warning: external project "nowhere" is
+// unavailable…`. The issue's own blocker is still refused.
+func TestEmbeddedCloseIgnoresUnrelatedExternalEdges(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "xu")
+	other := bdCreate(t, bd, dir, "Waits for nowhere", "--type", "task")
+	free := bdCreate(t, bd, dir, "Free work", "--type", "task")
+	upd := bdCreate(t, bd, dir, "Free work closed by update", "--type", "task")
+	held := bdCreate(t, bd, dir, "Waits for nowhere too", "--type", "task")
+	run := func(args ...string) (string, string, error) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
+	}
+	for _, edge := range [][2]string{{other.ID, "external:nowhere:cap"}, {held.ID, "external:nowhere:other"}} {
+		if stdout, stderr, err := run("dep", "add", edge[0], edge[1]); err != nil {
+			t.Fatalf("bd dep add: %v\n%s\n%s", err, stdout, stderr)
+		}
+	}
+
+	for _, args := range [][]string{{"close", free.ID}, {"update", upd.ID, "--status", "closed"}} {
+		stdout, stderr, err := run(args...)
+		if err != nil {
+			t.Fatalf("bd %s: %v\n%s\n%s", strings.Join(args, " "), err, stdout, stderr)
+		}
+		if strings.Contains(stdout+stderr, "external project") {
+			t.Errorf("bd %s warned about a project only an unrelated issue references:\n%s%s", strings.Join(args, " "), stdout, stderr)
+		}
+	}
+
+	stdout, stderr, err := run("close", held.ID)
+	if err == nil || !strings.Contains(stdout+stderr, "external:nowhere:other") {
+		t.Errorf("bd close of an externally blocked issue: err=%v, want a refusal naming its own blocker\n%s\n%s", err, stdout, stderr)
+	}
+	if got := bdShow(t, bd, dir, held.ID); got.Status != types.StatusOpen {
+		t.Errorf("%s status after a refused close = %s, want open", held.ID, got.Status)
+	}
+}

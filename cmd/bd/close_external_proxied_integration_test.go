@@ -144,3 +144,42 @@ func TestProxiedServerForcedStatusCloseBypassesExternalBlockers(t *testing.T) {
 		t.Errorf("forced update left %s %s, want closed", held.ID, got)
 	}
 }
+
+// TestProxiedServerCloseIgnoresUnrelatedExternalEdges is the proxied route's
+// half of TestEmbeddedCloseIgnoresUnrelatedExternalEdges: closing unrelated
+// work resolves no other issue's `external:` edge, so it prints no warning
+// about that issue's unavailable project; the closed issue's own blocker is
+// still refused.
+func TestProxiedServerCloseIgnoresUnrelatedExternalEdges(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "cxn")
+
+	other := bdProxiedCreate(t, bd, p.dir, "Waits for nowhere")
+	free := bdProxiedCreate(t, bd, p.dir, "Free work")
+	upd := bdProxiedCreate(t, bd, p.dir, "Free work closed by update")
+	held := bdProxiedCreate(t, bd, p.dir, "Waits for nowhere too")
+	for _, edge := range [][2]string{{other.ID, "external:nowhere:cap"}, {held.ID, "external:nowhere:other"}} {
+		if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "dep", "add", edge[0], edge[1]); err != nil {
+			t.Fatalf("bd dep add: %v\n%s\n%s", err, stdout, stderr)
+		}
+	}
+
+	for _, args := range [][]string{{"close", free.ID}, {"update", upd.ID, "--status", "closed"}} {
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+		if err != nil {
+			t.Fatalf("bd %s: %v\n%s\n%s", strings.Join(args, " "), err, stdout, stderr)
+		}
+		if strings.Contains(stdout+stderr, "external project") {
+			t.Errorf("bd %s warned about a project only an unrelated issue references:\n%s%s", strings.Join(args, " "), stdout, stderr)
+		}
+	}
+
+	if out := bdProxiedCloseFail(t, bd, p.dir, held.ID); !strings.Contains(out, "external:nowhere:other") {
+		t.Errorf("refusal does not name the closed issue's own blocker:\n%s", out)
+	}
+	if got := bdProxiedShow(t, bd, p.dir, held.ID); got.Status != types.StatusOpen {
+		t.Errorf("%s status after a refused close = %s, want open", held.ID, got.Status)
+	}
+}

@@ -50,10 +50,11 @@ func (s *Store) ReadyLister() (issueops.ReadyLister, error) {
 	return newPolicyReadyLister(inner, s.readyPolicy()), nil
 }
 
-// readyPolicy reads this store's edges from beneath every decorator, the same
-// source the store-level overrides use.
+// readyPolicy reads this store's workspace edges from beneath every decorator,
+// the same source the store-level overrides use, and a named issue's own edges
+// from the inner store, as externalBlockersOf does.
 func (s *Store) readyPolicy() readyPolicy {
-	return readyPolicy{policy: s.Policy, edges: s.edgeSource()}
+	return readyPolicy{policy: s.Policy, edges: s.edgeSource(), own: s.inner.GetDependencyRecordsForIssues}
 }
 
 // issueClosed answers the re-close exemption from beneath every decorator.

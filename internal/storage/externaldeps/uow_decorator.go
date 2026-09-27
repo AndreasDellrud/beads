@@ -306,10 +306,18 @@ func (p *uowProvider) ReadyClaimer() (publicops.ReadyClaimer, error) {
 	return newPolicyReadyClaimer(inner, p.readyPolicy()), nil
 }
 
-// readyPolicy reads the edges in a read-only unit of work of the undecorated
-// provider, one per call.
+// readyPolicy reads the edges — the workspace's, or a guard's named issues'
+// own — in a read-only unit of work of the undecorated provider, one per call.
 func (p *uowProvider) readyPolicy() readyPolicy {
-	return readyPolicy{policy: p.policy, edges: p.externalEdges}
+	return readyPolicy{policy: p.policy, edges: p.externalEdges, own: p.ownEdges}
+}
+
+// ownEdges reads ids' own dependency records, from both planes, in one
+// read-only unit of work of the undecorated provider.
+func (p *uowProvider) ownEdges(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	return uow.RunTxRead(ctx, p.UnitOfWorkProvider, func(ctx context.Context, uw uow.UnitOfWork) (map[string][]*types.Dependency, error) {
+		return uw.DependencyUseCase().GetIssueDependencyRecords(ctx, ids)
+	})
 }
 
 func (p *uowProvider) externalEdges(ctx context.Context) (map[string][]*types.Dependency, error) {
@@ -602,16 +610,16 @@ type issueUseCase struct {
 // With a pre-resolved verdict (a guarded role's call) it re-reads only this
 // workspace's edges — one indexed query, no foreign IO inside the write
 // transaction — and looks each of id's refs up in it; a ref the resolution did
-// not see fails closed. Without one (a raw-UOW caller) it resolves in place,
-// which is the only answer available to a caller that opened the transaction
-// itself.
+// not see fails closed. Without one (a raw-UOW caller) it resolves id's own
+// refs in place — never another issue's — which is the only answer available
+// to a caller that opened the transaction itself.
 func (u *issueUseCase) blockersOf(ctx context.Context, id string) ([]string, error) {
 	if u.resolved == nil {
-		state, err := u.blockingState(ctx)
+		refs, err := u.policy.blockersOf(ctx, u.deps.GetIssueDependencyRecords, []string{id})
 		if err != nil {
 			return nil, err
 		}
-		return state.refsByIssue[id], nil
+		return refs[id], nil
 	}
 	edges, err := u.deps.GetExternalBlockingDependencyRecords(ctx)
 	if err != nil {

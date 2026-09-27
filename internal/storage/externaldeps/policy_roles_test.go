@@ -338,8 +338,9 @@ func TestWrapSkipsOnlyServerEnforcedStores(t *testing.T) {
 
 // TestBatchCloserReadsNoEdgesWhenForcedWithoutAClaim: a forced batch skips the
 // close guard and, with no claim to narrow, has no use for the exclusions, so
-// it must not pay the whole-workspace edge read. An unforced batch, or a
-// forced one that earns a claim, still reads them exactly once.
+// it must not pay any edge read. A batch that earns a claim reads the
+// workspace's edges exactly once (the claim may land on any ready issue); an
+// unforced one without a claim reads only its items' own edges, once.
 func TestBatchCloserReadsNoEdgesWhenForcedWithoutAClaim(t *testing.T) {
 	raw, foreign := policyWorkspace()
 	closer, err := testStore(raw, foreign, true).BatchCloser()
@@ -350,17 +351,22 @@ func TestBatchCloserReadsNoEdgesWhenForcedWithoutAClaim(t *testing.T) {
 		name  string
 		req   publicops.CloseBatchRequest
 		reads int
+		own   int
 	}{
-		{"forced, no claim", publicops.CloseBatchRequest{Actor: "w", Force: true, Items: []publicops.BatchCloseItem{{IssueID: "be-unsat"}}}, 0},
-		{"forced, claim", publicops.CloseBatchRequest{Actor: "w", Force: true, Items: []publicops.BatchCloseItem{{IssueID: "be-unsat"}}, ClaimNext: &publicops.ReadyRequest{Sort: "priority"}}, 1},
-		{"unforced", publicops.CloseBatchRequest{Actor: "w", Items: []publicops.BatchCloseItem{{IssueID: "be-plain"}}}, 1},
+		{"forced, no claim", publicops.CloseBatchRequest{Actor: "w", Force: true, Items: []publicops.BatchCloseItem{{IssueID: "be-unsat"}}}, 0, 0},
+		{"forced, claim", publicops.CloseBatchRequest{Actor: "w", Force: true, Items: []publicops.BatchCloseItem{{IssueID: "be-unsat"}}, ClaimNext: &publicops.ReadyRequest{Sort: "priority"}}, 1, 0},
+		{"unforced", publicops.CloseBatchRequest{Actor: "w", Items: []publicops.BatchCloseItem{{IssueID: "be-plain"}}}, 0, 1},
+		{"unforced, claim", publicops.CloseBatchRequest{Actor: "w", Items: []publicops.BatchCloseItem{{IssueID: "be-plain"}}, ClaimNext: &publicops.ReadyRequest{Sort: "priority"}}, 1, 0},
 	} {
-		before := raw.edgeReads
+		before, ownBefore := raw.edgeReads, raw.ownReads
 		if _, err := closer.CloseBatch(t.Context(), tc.req); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		if got := raw.edgeReads - before; got != tc.reads {
-			t.Errorf("%s read the external edges %d times, want %d", tc.name, got, tc.reads)
+			t.Errorf("%s read the workspace's external edges %d times, want %d", tc.name, got, tc.reads)
+		}
+		if got := raw.ownReads - ownBefore; got != tc.own {
+			t.Errorf("%s read its items' own edges %d times, want %d", tc.name, got, tc.own)
 		}
 	}
 }

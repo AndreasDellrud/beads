@@ -3,6 +3,7 @@ package externaldeps
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
@@ -44,10 +45,14 @@ import (
 // roles resolve the FOREIGN half first, outside the write transaction
 // (preResolved), so the in-transaction check reads only local edges.
 
-// readyPolicy binds the policy to the edge source of one seam.
+// readyPolicy binds the policy to the edge sources of one seam: edges reads
+// the whole workspace's external edges, which only narrowing a READY set
+// needs; own reads named issues' edges, which is all a guard on those issues
+// needs.
 type readyPolicy struct {
 	policy *Policy
 	edges  EdgeSource
+	own    OwnEdgeSource
 }
 
 // ClosedSource reports whether an issue is already closed. A miss is false.
@@ -240,7 +245,7 @@ func (c *policyBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBa
 		// Forced, and no claim to narrow: nothing below would read the edges.
 		return c.inner.CloseBatch(ctx, req)
 	}
-	refs, err := c.policy.policy.Exclusions(ctx, c.policy.edges)
+	refs, err := c.blockers(ctx, req)
 	if err != nil {
 		return issueops.CloseBatchResult{}, err
 	}
@@ -292,6 +297,26 @@ func (c *policyBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBa
 		outcomes[sent[j]] = outcome
 	}
 	return issueops.CloseBatchResult{Outcomes: outcomes, ClaimedNext: result.ClaimedNext}, nil
+}
+
+// blockers answers which of the batch's items an unsatisfied external blocker
+// holds. With a claim to narrow, that is the workspace-wide exclusion set —
+// the claim may land on any ready issue, and the same read also guards the
+// items. Without one only the items' own edges are read and only their refs
+// resolved, the way policyBatchApplier resolves: `bd close X` used to open
+// every foreign project ANY issue referenced, and warn about an unrelated
+// issue's unavailable project on every close.
+func (c *policyBatchCloser) blockers(ctx context.Context, req issueops.CloseBatchRequest) (map[string][]string, error) {
+	if req.ClaimNext != nil || c.policy.own == nil {
+		return c.policy.policy.Exclusions(ctx, c.policy.edges)
+	}
+	ids := make([]string, 0, len(req.Items))
+	for _, item := range req.Items {
+		if !slices.Contains(ids, item.IssueID) {
+			ids = append(ids, item.IssueID)
+		}
+	}
+	return c.policy.policy.blockersOf(ctx, c.policy.own, ids)
 }
 
 // externallyBlocked is the refusal every CLOSE guard in this package returns,

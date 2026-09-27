@@ -31,6 +31,9 @@ type fakeStore struct {
 	// edgeReads counts every whole-workspace edge read the policy makes,
 	// through either the narrow query or the compatibility fallback.
 	edgeReads int
+	// ownReads counts every read of NAMED issues' edges
+	// (GetDependencyRecordsForIssues), which a guard on those issues makes.
+	ownReads int
 }
 
 func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
@@ -130,6 +133,7 @@ func (f *fakeStore) GetExternalBlockingDependencyRecords(_ context.Context) (map
 }
 
 func (f *fakeStore) GetDependencyRecordsForIssues(_ context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
+	f.ownReads++
 	result := make(map[string][]*types.Dependency)
 	for _, id := range issueIDs {
 		result[id] = f.deps[id]

@@ -40,6 +40,13 @@ type Policy struct {
 // or a read-only unit of work's DependencyUseCase one.
 type EdgeSource func(context.Context) (map[string][]*types.Dependency, error)
 
+// OwnEdgeSource reads the dependency records whose SOURCE is one of ids, from
+// both planes, keyed by source id: a store's GetDependencyRecordsForIssues, or
+// a unit of work's DependencyUseCase one. It is what a guard on named work
+// reads instead of the whole workspace's external edges, so an unrelated
+// issue's `external:` edge costs it neither a foreign open nor a warning.
+type OwnEdgeSource func(ctx context.Context, ids []string) (map[string][]*types.Dependency, error)
+
 // NewPolicy constructs the resolving half of the external capability policy.
 func NewPolicy(locateProject ProjectLocator, openProject StoreOpener) *Policy {
 	return &Policy{
@@ -68,6 +75,30 @@ func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject St
 // source's refs are what a close or claim guard reports in ErrCloseBlocked.
 func (p *Policy) Exclusions(ctx context.Context, edges EdgeSource) (map[string][]string, error) {
 	state, err := p.exclusionState(ctx, edges)
+	if err != nil {
+		return nil, err
+	}
+	return state.refsByIssue, nil
+}
+
+// blockersOf reads ids' OWN edges from edges and returns every one of ids an
+// unsatisfied `external:` blocker holds, mapped to those refs. Only the refs
+// ids carry are resolved, so a foreign project only some other issue
+// references is neither opened nor warned about. It fails closed exactly as
+// Exclusions does.
+func (p *Policy) blockersOf(ctx context.Context, edges OwnEdgeSource, ids []string) (map[string][]string, error) {
+	if len(ids) == 0 {
+		return map[string][]string{}, nil
+	}
+	deps, err := edges(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("external dependencies: list blocking records: %w", err)
+	}
+	own := make(map[string][]*types.Dependency, len(ids))
+	for _, id := range ids {
+		own[id] = deps[id]
+	}
+	state, err := p.blockingStateFromRecords(ctx, own)
 	if err != nil {
 		return nil, err
 	}
@@ -220,38 +251,26 @@ func GuardClaim(ctx context.Context, store storage.DoltStorage, id string) error
 // externalBlockersOf returns id's unsatisfied external refs, reading and
 // resolving only id's own edges.
 func (s *Store) externalBlockersOf(ctx context.Context, id string) ([]string, error) {
-	deps, err := s.inner.GetDependencyRecordsForIssues(ctx, []string{id})
+	refs, err := s.blockersOf(ctx, s.inner.GetDependencyRecordsForIssues, []string{id})
 	if err != nil {
 		return nil, err
 	}
-	refs := make([]reference, 0)
-	for _, dep := range deps[id] {
-		if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
-			refs = append(refs, parseReference(dep.DependsOnID))
-		}
-	}
-	satisfied, err := s.resolveReferences(ctx, refs)
-	if err != nil {
-		return nil, err
-	}
-	var blockers []string
-	for _, ref := range refs {
-		if !satisfied[ref.raw] {
-			blockers = appendUnique(blockers, ref.raw)
-		}
-	}
-	return blockers, nil
+	return refs[id], nil
 }
 
+// guardExternalClose refuses closing id while an unsatisfied external blocker
+// holds it, unless forced or id is already closed. It reads and resolves only
+// id's own edges: it used to read every external edge in the workspace and
+// open every foreign project they named, so closing one issue warned about an
+// unrelated issue's unavailable project.
 func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) error {
 	if force {
 		return nil
 	}
-	state, err := s.loadBlockingState(ctx)
+	blockers, err := s.externalBlockersOf(ctx, id)
 	if err != nil {
 		return err
 	}
-	blockers := state.refsByIssue[id]
 	refused, err := closeRefused(ctx, s.issueClosed, id, blockers)
 	if err != nil {
 		return err
