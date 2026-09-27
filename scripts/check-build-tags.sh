@@ -98,9 +98,18 @@ for f in "${candidates[@]}"; do
         # still has its `go test` checked. Make variable references like
         # $(BAZEL) are rewritten to ${BAZEL} first so they are not split.
         # Lines without a Bazel invocation are checked unchanged.
-        segmented="$(printf '%s\n' "$stripped" \
-            | sed -E -e 's/\$\(([A-Za-z_][A-Za-z0-9_]*)\)/${\1}/g' \
-                     -e 's/(&&|\|\||;|\||\$\(|`)/\n/g')"
+        # Pure bash (no sed): BSD sed does not expand \n in replacements.
+        segmented="$stripped"
+        while [[ "$segmented" =~ \$\(([A-Za-z_][A-Za-z0-9_]*)\) ]]; do
+            segmented="${segmented/"${BASH_REMATCH[0]}"/\$\{${BASH_REMATCH[1]}\}}"
+        done
+        nl=$'\n'
+        segmented="${segmented//&&/$nl}"
+        segmented="${segmented//||/$nl}"
+        segmented="${segmented//;/$nl}"
+        segmented="${segmented//|/$nl}"
+        segmented="${segmented//\$\(/$nl}"
+        segmented="${segmented//\`/$nl}"
         if [[ "$segmented" =~ $bazel_invocation_regex ]]; then
             stripped=""
             while IFS= read -r segment; do
