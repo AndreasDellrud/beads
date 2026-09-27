@@ -125,7 +125,10 @@ func servedPolicyProvider(issues *fakeIssues, edges map[string][]*types.Dependen
 // TestServedClaimRefusesExternallyBlockedWork pins the claim endpoint on serve's
 // PROVIDER arm: an issue held back by an unsatisfied `external:` blocker is
 // refused before the compare-and-set runs, as the store arm and `bd update
-// --claim` refuse it, and the policy reads the edges once for the request.
+// --claim` refuse it. The policy reads the local edges TWICE for the request:
+// once before the claim's write transaction, to resolve the foreign projects
+// with no transaction open, and once inside it, so an edge committed in
+// between is still seen (externaldeps.preResolved).
 func TestServedClaimRefusesExternallyBlockedWork(t *testing.T) {
 	issues := &fakeIssues{issue: seededIssue("bd-1", "", types.StatusOpen)}
 	reads := 0
@@ -142,8 +145,8 @@ func TestServedClaimRefusesExternallyBlockedWork(t *testing.T) {
 	if n := len(issues.claimed()); n != 0 {
 		t.Fatalf("the compare-and-set ran %d times for an externally blocked issue, want 0", n)
 	}
-	if reads != 1 {
-		t.Errorf("the request read the external edges %d times, want exactly 1", reads)
+	if reads != 2 {
+		t.Errorf("the request read the external edges %d times, want exactly 2 (pre-resolution, then in the claim's transaction)", reads)
 	}
 
 	// The same server claims the issue once the blocker is gone, so the

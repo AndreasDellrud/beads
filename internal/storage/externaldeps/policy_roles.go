@@ -39,8 +39,10 @@ import (
 // by that one call, which answers as of the read. Callers that need the check
 // inside their own transaction have it — the use-case overrides on the
 // unit-of-work arm (issueUseCase in uow_decorator.go) read the edges in the
-// caller's unit of work, which is why claim-by-id and the lifecycle's close
-// are built over the policy provider rather than wrapped here.
+// caller's unit of work, which is why claim-by-id and the lifecycle's claim
+// and close are built over the policy provider rather than wrapped here. Those
+// roles resolve the FOREIGN half first, outside the write transaction
+// (preResolved), so the in-transaction check reads only local edges.
 
 // readyPolicy binds the policy to the edge source of one seam, and to that
 // seam's way of asking whether an issue is already closed.

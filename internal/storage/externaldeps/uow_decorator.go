@@ -27,6 +27,59 @@ func WrapUOWProvider(inner uow.UnitOfWorkProvider, locate ProjectLocator, open S
 type uowProvider struct {
 	uow.UnitOfWorkProvider
 	policy *Policy
+	// resolved is set only on the per-call copy a guarded mutation role builds
+	// (withResolved): the foreign half of that call's verdict, resolved before
+	// its write transaction opened. Nil on the provider every caller holds, so a
+	// raw unit of work keeps resolving inside its own transaction.
+	resolved *preResolved
+}
+
+// preResolved is the FOREIGN half of one mutation's external-dependency
+// verdict — whether each `external:` ref the target carried is satisfied —
+// resolved BEFORE the mutation's write transaction opens.
+//
+// Resolving a ref opens the foreign project's store and queries it. Doing that
+// inside a claim's or close's write transaction held a pooled connection (and
+// the transaction) across foreign IO, once more on every RunTxResult retry — on
+// bd serve, a handful of concurrent claims against a slow foreign project could
+// drain the pool. So the guarded roles resolve first, in no transaction, and
+// the check inside the transaction only re-reads this workspace's own edges
+// (one indexed query, no foreign IO) and looks each ref up here.
+//
+// A ref the transaction sees that is NOT in satisfied — an edge committed
+// after the resolution — counts as unsatisfied: the policy fails closed, and
+// the caller's retry resolves it.
+type preResolved struct {
+	satisfied map[string]bool
+}
+
+// resolveFor resolves the external refs ids carry now: one read-only unit of
+// work of the undecorated provider for the edges, then the foreign lookups
+// with no transaction open. An id with no external edge costs no foreign IO.
+func (p *uowProvider) resolveFor(ctx context.Context, ids ...string) (*preResolved, error) {
+	edges, err := p.externalEdges(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("external dependencies: list blocking records: %w", err)
+	}
+	var refs []reference
+	for _, id := range ids {
+		for _, dep := range edges[id] {
+			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
+				refs = append(refs, parseReference(dep.DependsOnID))
+			}
+		}
+	}
+	satisfied, err := p.policy.resolveReferences(ctx, refs)
+	if err != nil {
+		return nil, fmt.Errorf("external dependencies: resolve blockers: %w", err)
+	}
+	return &preResolved{satisfied: satisfied}, nil
+}
+
+// withResolved is this provider for ONE guarded call: same inner provider, same
+// policy, and the verdict resolveFor produced for it.
+func (p *uowProvider) withResolved(r *preResolved) *uowProvider {
+	return &uowProvider{UnitOfWorkProvider: p.UnitOfWorkProvider, policy: p.policy, resolved: r}
 }
 
 var _ uow.UnitOfWorkProvider = (*uowProvider)(nil)
@@ -47,7 +100,7 @@ func (p *uowProvider) Rewrap(inner uow.UnitOfWorkProvider) uow.UnitOfWorkProvide
 	if inner == nil {
 		return nil
 	}
-	return &uowProvider{UnitOfWorkProvider: inner, policy: p.policy}
+	return &uowProvider{UnitOfWorkProvider: inner, policy: p.policy, resolved: p.resolved}
 }
 
 // RunNonTx preserves the optional maintenance capability exposed by the
@@ -66,13 +119,79 @@ func (p *uowProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &unitOfWork{UnitOfWork: inner, policy: p.policy}, nil
+	return &unitOfWork{UnitOfWork: inner, policy: p.policy, resolved: p.resolved}, nil
 }
 
 // Provider capability accessors build roles on this wrapper. Delegating them
 // to the inner provider would silently discard external-dependency policy for
 // every command that reaches the proxied seam through an optional source.
-func (p *uowProvider) IssueLifecycle() (publicops.Lifecycle, error) { return uow.NewIssueOperations(p) }
+func (p *uowProvider) IssueLifecycle() (publicops.Lifecycle, error) {
+	if _, err := uow.NewIssueOperations(p); err != nil {
+		return nil, err
+	}
+	return &resolvingLifecycle{provider: p}, nil
+}
+
+// resolvingLifecycle is the lifecycle role over this provider, with the
+// external refs of a guarded mutation — a claim, a close, or an update that
+// does either — resolved before its write transaction (preResolved). Create
+// and Reopen carry no external-dependency guard and go straight through.
+type resolvingLifecycle struct {
+	provider *uowProvider
+}
+
+var _ publicops.Lifecycle = (*resolvingLifecycle)(nil)
+
+func (l *resolvingLifecycle) ops(ctx context.Context, guardedID string) (publicops.Lifecycle, error) {
+	if guardedID == "" {
+		return uow.NewIssueOperations(l.provider)
+	}
+	resolved, err := l.provider.resolveFor(ctx, guardedID)
+	if err != nil {
+		return nil, err
+	}
+	return uow.NewIssueOperations(l.provider.withResolved(resolved))
+}
+
+func (l *resolvingLifecycle) Create(ctx context.Context, req publicops.CreateRequest) (publicops.CreateResult, error) {
+	ops, err := l.ops(ctx, "")
+	if err != nil {
+		return publicops.CreateResult{}, err
+	}
+	return ops.Create(ctx, req)
+}
+
+func (l *resolvingLifecycle) Update(ctx context.Context, req publicops.UpdateRequest) (publicops.UpdateResult, error) {
+	guarded := ""
+	if req.Claim || (req.Patch.Status.Set && req.Patch.Status.Value == types.StatusClosed) {
+		guarded = req.IssueID
+	}
+	ops, err := l.ops(ctx, guarded)
+	if err != nil {
+		return publicops.UpdateResult{}, err
+	}
+	return ops.Update(ctx, req)
+}
+
+func (l *resolvingLifecycle) Close(ctx context.Context, req publicops.CloseRequest) (publicops.CloseResult, error) {
+	guarded := req.IssueID
+	if req.Force {
+		guarded = "" // a forced close is not guarded, so it resolves nothing
+	}
+	ops, err := l.ops(ctx, guarded)
+	if err != nil {
+		return publicops.CloseResult{}, err
+	}
+	return ops.Close(ctx, req)
+}
+
+func (l *resolvingLifecycle) Reopen(ctx context.Context, req publicops.ReopenRequest) (publicops.ReopenResult, error) {
+	ops, err := l.ops(ctx, "")
+	if err != nil {
+		return publicops.ReopenResult{}, err
+	}
+	return ops.Reopen(ctx, req)
+}
 
 // IssueReader, ReadyCounter, ReadyLister and ReadyClaimer use the SAME role wrappers as the
 // store decorator (policy_roles.go): the exclusions are read once, in a
@@ -99,7 +218,38 @@ func (p *uowProvider) IssueReader() (publicops.Reader, error) {
 // does NOT reach it: the lifecycle's Update runs ApplyUpdate, whose claim
 // calls the undecorated use case's own ClaimIssue, so ApplyUpdate below
 // carries the same guard for a spec with Claim set.
-func (p *uowProvider) IssueClaimer() (publicops.Claimer, error)     { return uow.NewIssueClaimer(p) }
+//
+// Each Claim resolves the claimed issue's `external:` refs FIRST, with no
+// transaction open (resolvingClaimer, preResolved), so the check inside the
+// claim's write transaction touches no foreign project. IssueLifecycle does
+// the same for a claim or a close.
+func (p *uowProvider) IssueClaimer() (publicops.Claimer, error) {
+	if _, err := uow.NewIssueClaimer(p); err != nil {
+		return nil, err
+	}
+	return &resolvingClaimer{provider: p}, nil
+}
+
+// resolvingClaimer is the claim-by-id role over this provider with the claimed
+// issue's external refs resolved before the claim's write transaction.
+type resolvingClaimer struct {
+	provider *uowProvider
+}
+
+var _ publicops.Claimer = (*resolvingClaimer)(nil)
+
+func (c *resolvingClaimer) Claim(ctx context.Context, req publicops.ClaimRequest) (publicops.ClaimResult, error) {
+	resolved, err := c.provider.resolveFor(ctx, req.IssueID)
+	if err != nil {
+		return publicops.ClaimResult{}, err
+	}
+	role, err := uow.NewIssueClaimer(c.provider.withResolved(resolved))
+	if err != nil {
+		return publicops.ClaimResult{}, err
+	}
+	return role.Claim(ctx, req)
+}
+
 func (p *uowProvider) IssueRelations() (publicops.Relations, error) { return uow.NewIssueRelations(p) }
 func (p *uowProvider) EdgeReader() (publicops.EdgeReader, error)    { return uow.NewEdgeReader(p) }
 func (p *uowProvider) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
@@ -278,9 +428,10 @@ var (
 
 type unitOfWork struct {
 	uow.UnitOfWork
-	policy *Policy
-	issue  domain.IssueUseCase
-	deps   domain.DependencyUseCase
+	policy   *Policy
+	resolved *preResolved
+	issue    domain.IssueUseCase
+	deps     domain.DependencyUseCase
 }
 
 var _ uow.UnitOfWork = (*unitOfWork)(nil)
@@ -296,6 +447,7 @@ func (u *unitOfWork) IssueUseCase() domain.IssueUseCase {
 			IssueUseCase: u.UnitOfWork.IssueUseCase(),
 			deps:         u.DependencyUseCase(),
 			policy:       u.policy,
+			resolved:     u.resolved,
 		}
 	}
 	return u.issue
@@ -313,8 +465,42 @@ func (u *unitOfWork) DependencyUseCase() domain.DependencyUseCase {
 
 type issueUseCase struct {
 	domain.IssueUseCase
-	deps   domain.DependencyUseCase
-	policy *Policy
+	deps     domain.DependencyUseCase
+	policy   *Policy
+	resolved *preResolved
+}
+
+// blockersOf returns the unsatisfied external refs holding id back, read in
+// THIS unit of work.
+//
+// With a pre-resolved verdict (a guarded role's call) it re-reads only this
+// workspace's edges — one indexed query, no foreign IO inside the write
+// transaction — and looks each of id's refs up in it; a ref the resolution did
+// not see fails closed. Without one (a raw-UOW caller) it resolves in place,
+// which is the only answer available to a caller that opened the transaction
+// itself.
+func (u *issueUseCase) blockersOf(ctx context.Context, id string) ([]string, error) {
+	if u.resolved == nil {
+		state, err := u.blockingState(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return state.refsByIssue[id], nil
+	}
+	edges, err := u.deps.GetExternalBlockingDependencyRecords(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("external dependencies: list blocking records: %w", err)
+	}
+	var blockers []string
+	for _, dep := range edges[id] {
+		if dep == nil || !dep.Type.IsBlockingEdge() || !isExternalReference(dep.DependsOnID) {
+			continue
+		}
+		if !u.resolved.satisfied[dep.DependsOnID] {
+			blockers = appendUnique(blockers, dep.DependsOnID)
+		}
+	}
+	return blockers, nil
 }
 
 // blockingState reads the edges in THIS unit of work, so raw-UOW callers (the
@@ -445,11 +631,11 @@ func (u *issueUseCase) ClaimWisp(ctx context.Context, id, actor string) (domain.
 // holds it back. There is no force bypass: a claim is not a close, and neither
 // ReadyClaimer nor the claim-by-id role has ever offered one.
 func (u *issueUseCase) guardExternalClaim(ctx context.Context, id string) error {
-	state, err := u.blockingState(ctx)
+	blockers, err := u.blockersOf(ctx, id)
 	if err != nil {
 		return err
 	}
-	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
+	if len(blockers) > 0 {
 		return externallyBlocked(id, blockers)
 	}
 	return nil
@@ -502,11 +688,10 @@ func (u *issueUseCase) guardExternalClose(ctx context.Context, id string, force 
 	if force {
 		return nil
 	}
-	state, err := u.blockingState(ctx)
+	blockers, err := u.blockersOf(ctx, id)
 	if err != nil {
 		return err
 	}
-	blockers := state.refsByIssue[id]
 	refused, err := closeRefused(ctx, u.issueClosed, id, blockers)
 	if err != nil {
 		return err
