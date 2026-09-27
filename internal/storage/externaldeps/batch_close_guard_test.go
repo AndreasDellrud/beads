@@ -128,3 +128,63 @@ func (p *countingUOWProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error
 }
 
 var _ domain.IssueUseCase = (*fakeIssueUseCase)(nil)
+
+// landingIssues reports every close as landed, so a batch earns its claim.
+type landingIssues struct{ *fakeIssueUseCase }
+
+func (u landingIssues) CloseIssueChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {
+	if _, err := u.fakeIssueUseCase.CloseIssueChecked(ctx, id, params, actor, force); err != nil {
+		return domain.CloseIssueResult{}, err
+	}
+	return domain.CloseIssueResult{Closed: true}, nil
+}
+
+// TestUOWBatchCloserAppliesThePolicyExactlyOnce pins the unit-of-work arm's
+// batch closer to ONE application of the policy per call: one external-edge
+// read serves the close guard and the ClaimNext narrowing, with and without a
+// flagged item, and the claim the batch earns skips the externally blocked
+// issue. The inner closer runs over the UNDECORATED provider (plus, when an
+// item is flagged, the close-only batchCloseGuard); built over the policy
+// provider, the claim's ClaimReadyIssue would hit the policy's use-case
+// override and read the edges a second time, inside the write transaction.
+func TestUOWBatchCloserAppliesThePolicyExactlyOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		items []string
+	}{
+		{"no flagged item", []string{"be-done"}},
+		{"with a flagged item", []string{"be-done", "be-held"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done, held, next := issue("be-done"), issue("be-held"), issue("be-next")
+			held.Priority, next.Priority = 0, 1
+			base := &fakeIssueUseCase{ready: []*types.Issue{held, next, done}}
+			deps := &countingDependencyUseCase{fakeDependencyUseCase: &fakeDependencyUseCase{external: map[string][]*types.Dependency{
+				held.ID: {externalDep(held.ID, "external:remote:payments", types.DepBlocks)},
+			}}}
+			inner := &fakeUOW{issues: landingIssues{base}, deps: deps}
+			provider := WrapUOWProvider(&openCountingProvider{uw: inner}, func(ProjectName) (string, bool) { return "", false }, nil)
+			closer, err := provider.(uow.BatchCloserSource).BatchCloser()
+			if err != nil {
+				t.Fatal(err)
+			}
+			items := make([]publicops.BatchCloseItem, 0, len(tc.items))
+			for _, id := range tc.items {
+				items = append(items, publicops.BatchCloseItem{IssueID: id})
+			}
+			result, err := closer.CloseBatch(t.Context(), publicops.CloseBatchRequest{
+				Actor: "w", Items: items, ClaimNext: &publicops.ReadyRequest{Sort: "priority"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertReads(t, "CloseBatch+ClaimNext", deps, 1)
+			if result.ClaimedNext == nil || result.ClaimedNext.ID == held.ID {
+				t.Errorf("claimed %+v, want a claim that skips the externally blocked %s", result.ClaimedNext, held.ID)
+			}
+			if len(tc.items) > 1 && !errors.Is(result.Outcomes[1].Err, storage.ErrCloseBlocked) {
+				t.Errorf("flagged item outcome = %+v, want the external refusal", result.Outcomes[1])
+			}
+		})
+	}
+}
