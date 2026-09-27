@@ -100,6 +100,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates, deletes and demote-to-wisp.
 
 
+- **`bd update --claim` no longer claims work an unsatisfied `external:`
+  dependency holds back.** On both the direct and the `--proxied-server`
+  route the claim went straight to the backend's compare-and-set, past the
+  external-dependency policy that `bd ready --claim` and the claim endpoint
+  already applied. It is now refused (nonzero, the blocker named, nothing
+  written); `--force` does not bypass it, since a claim has no force.
+
+- **A batch `bd close` can no longer close externally blocked work through a
+  concurrent reopen.** The "already closed, so re-closing is a no-op"
+  exemption for an issue an unsatisfied `external:` dependency holds was
+  decided on a status read taken before the batch; it is now decided in the
+  batch's own transaction (proxied / `bd serve` provider arm) or the item is
+  never sent to the closer at all (direct / store arm).
+
+- **`bd serve` answers an externally blocked claim with `409 not_claimable`**
+  ("issue is blocked by an unsatisfied dependency"), not `not_closable` with
+  close-with-force advice. The claim's `external:` refusal is the same set on
+  both of `bd serve`'s arms: the store arm no longer refuses a claim-by-id of
+  an issue whose only blocker is LOCAL, matching the provider arm and the CLI.
+
 - **`bd list --watch --format` is refused instead of silently dropping the
   format** ([#6277](https://github.com/gastownhall/beads/issues/6277)).
   `--watch` always re-renders the pretty listing, so on the direct route a
