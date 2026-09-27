@@ -164,9 +164,7 @@ func runComplexityDiff(t *testing.T, repo, tool string) (string, error) {
 // runfiles tree does not have.
 func complexityGitFixture(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
+	requireHostTool(t, "git")
 	script, err := os.ReadFile(filepath.Join(sourceRepoRoot(t), "scripts", "ci", "complexity.sh"))
 	if err != nil {
 		t.Fatal(err)
