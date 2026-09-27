@@ -90,6 +90,7 @@ func TestContextRoutesNameOneWorkspaceTheSameWay(t *testing.T) {
 			git.ResetCaches()
 			beads.ResetCaches()
 			t.Cleanup(beads.ResetCaches)
+			t.Cleanup(git.ResetCaches)
 
 			provider, err := contextinfo.NewContextProvider(dir, Version).ContextUseCase().GetContextInfo(t.Context())
 			if err != nil {
