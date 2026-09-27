@@ -1,9 +1,54 @@
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load(":dolt.bzl", "hermetic_bin")
+
+# DOLT_VERSION is read as text by the dolt pin tests in //scripts.
+exports_files(
+    ["dolt.bzl"],
+    visibility = ["//scripts:__pkg__"],
+)
 
 # Wraps every test process (`test --run_under` in .bazelrc) with the isolated
 # HOME/XDG/Dolt/git environment that scripts/ci/lib/test-env.sh gives `go test`.
+# Bazel merges the run_under target's runfiles into every test's runfiles, so
+# each test action declares the pinned dolt as an input and the wrapper puts
+# it first on PATH.
 sh_binary(
     name = "test_env",
     srcs = ["test_env.sh"],
+    data = [":hermetic_bin"],
     visibility = ["//visibility:public"],
 )
+
+# PATH directory holding the hermetic host tools, at
+# <runfiles>/_main/tools/bazel/hermetic_bin/.
+hermetic_bin(
+    name = "hermetic_bin",
+    tools = {":dolt": "dolt"},
+)
+
+# The pinned Dolt CLI (tools/bazel/dolt.bzl) for the platform tests run on.
+alias(
+    name = "dolt",
+    actual = select(
+        {
+            ":darwin_amd64": "@dolt_darwin_amd64//:dolt",
+            ":darwin_arm64": "@dolt_darwin_arm64//:dolt",
+            ":linux_amd64": "@dolt_linux_amd64//:dolt",
+            ":linux_arm64": "@dolt_linux_arm64//:dolt",
+        },
+        no_match_error = "no pinned dolt release for this platform (tools/bazel/dolt.bzl)",
+    ),
+    visibility = ["//visibility:public"],
+)
+
+[
+    config_setting(
+        name = "{}_{}".format(os, cpu),
+        constraint_values = [
+            "@platforms//os:" + ("osx" if os == "darwin" else os),
+            "@platforms//cpu:" + ("x86_64" if cpu == "amd64" else "aarch64"),
+        ],
+    )
+    for os in ("darwin", "linux")
+    for cpu in ("amd64", "arm64")
+]

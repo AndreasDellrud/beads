@@ -45,6 +45,29 @@ unset BEADS_DIR BEADS_DB BD_DB BD_JSON BD_NO_DB BD_NO_DAEMON BD_ACTOR \
 	BEADS_DOLT_PORT BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_SOCKET \
 	BEADS_DOLT_PASSWORD BEADS_TEST_REPO_ROOT
 
+# Hermetic host tools: the pinned Dolt CLI (tools/bazel/dolt.bzl) goes first on
+# PATH, so no test runs whatever dolt the executor happens to have, or skips
+# because it has none. The directory comes from this wrapper's own runfiles,
+# which Bazel merges into every test's runfiles, so it is always declared;
+# missing it means broken wiring, and every test fails rather than skipping.
+hermetic_bin=""
+runfiles="${RUNFILES_DIR:-${TEST_SRCDIR:-}}"
+rel="${TEST_WORKSPACE:-_main}/tools/bazel/hermetic_bin"
+if [[ -n "$runfiles" && -x "$runfiles/$rel/dolt" ]]; then
+	hermetic_bin="$runfiles/$rel"
+elif [[ -n "${RUNFILES_MANIFEST_FILE:-}" && -f "$RUNFILES_MANIFEST_FILE" ]]; then
+	dolt_path="$(awk -v k="$rel/dolt" '$1 == k { print $2; exit }' "$RUNFILES_MANIFEST_FILE")"
+	if [[ -n "$dolt_path" && -x "$dolt_path" ]]; then
+		hermetic_bin="${dolt_path%/*}"
+	fi
+fi
+if [[ -z "$hermetic_bin" ]]; then
+	printf 'test_env: hermetic dolt not found at %s in the runfiles of this test (//tools/bazel:hermetic_bin)\n' "$rel/dolt" >&2
+	exit 1
+fi
+export PATH="$hermetic_bin:${PATH:-/bin:/usr/bin}"
+export BEADS_TEST_DOLT_BINARY="$hermetic_bin/dolt"
+
 # Not exec: the trap must run to remove $root. The exit status is the test's.
 status=0
 "$@" || status=$?

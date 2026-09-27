@@ -1341,8 +1341,9 @@ func TestWorkflowsInstallPinnedDolt(t *testing.T) {
 	}
 }
 
-// TestPinnedDoltCLIMatchesContainerImage keeps the CLI pin and the sql-server
-// container pin on the same Dolt release. Server-mode tests run both at once
+// TestPinnedDoltCLIMatchesContainerImage keeps the CLI pin, the sql-server
+// container pin and the hermetic Bazel dolt (tools/bazel/dolt.bzl) on the same
+// Dolt release. Server-mode tests run both at once
 // against the same databases; a drifting pair tests a combination no release
 // ever shipped.
 func TestPinnedDoltCLIMatchesContainerImage(t *testing.T) {
@@ -1366,9 +1367,15 @@ func TestPinnedDoltCLIMatchesContainerImage(t *testing.T) {
 	}
 	pullVersion := captureOne(t, `dolthub/dolt-sql-server:([0-9]+\.[0-9]+\.[0-9]+)`, string(pullScript), "scripts/ci/pull-dolt-image.sh")
 
-	if cliVersion != imageVersion || cliVersion != pullVersion {
-		t.Errorf("dolt pins disagree: CLI %s, DoltDockerImage %s, pull-dolt-image.sh %s",
-			cliVersion, imageVersion, pullVersion)
+	bazelRule, err := os.ReadFile(filepath.Join(root, "tools", "bazel", "dolt.bzl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bazelVersion := captureOne(t, `(?m)^DOLT_VERSION = "([0-9]+\.[0-9]+\.[0-9]+)"$`, string(bazelRule), "tools/bazel/dolt.bzl:DOLT_VERSION")
+
+	if cliVersion != imageVersion || cliVersion != pullVersion || cliVersion != bazelVersion {
+		t.Errorf("dolt pins disagree: CLI %s, DoltDockerImage %s, pull-dolt-image.sh %s, tools/bazel/dolt.bzl %s",
+			cliVersion, imageVersion, pullVersion, bazelVersion)
 	}
 }
 

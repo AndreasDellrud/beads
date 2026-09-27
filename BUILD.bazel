@@ -56,6 +56,14 @@ filegroup(
     visibility = ["//test/docsync:__pkg__"],
 )
 
+# //scripts:scripts_test dolt pin tests (ci_workflow_test.go): the workflows
+# must install the pinned dolt.
+filegroup(
+    name = "workflow_files",
+    srcs = glob([".github/workflows/*.yml"]),
+    visibility = ["//scripts:__pkg__"],
+)
+
 # Inputs of the Bazel policy tests in //scripts (bazel_policy_test.go), so they
 # run under `bazel test` as well as `go test`.
 filegroup(

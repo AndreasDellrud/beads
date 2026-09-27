@@ -16,9 +16,17 @@ go_test(
         "release_script_test.go",
         "test_script_test.go",
     ],
-    data = ["//:bazel_policy_files"],
+    data = [
+        "ci/install-dolt.sh",
+        "ci/pull-dolt-image.sh",
+        "//:bazel_policy_files",
+        "//:workflow_files",
+        "//internal/testutil:testdoltcommon.go",
+        "//tools/bazel:dolt.bzl",
+    ],
     deps = [
         "//internal/formula",
+        "//internal/testutil/bazeltest",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
