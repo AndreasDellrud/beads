@@ -17,15 +17,11 @@ import (
 // readyInput is everything `bd ready` parsed off the command line: the
 // frontend-independent query (issueops.ReadyListRequest — the ready question
 // plus the client's --max-rows cap, which is exactly what the ReadyLister role
-// takes), the filter the proxied route still consumes, and the mode and
-// presentation choices that never leave the CLI.
+// takes) and the mode and presentation choices that never leave the CLI. Both
+// routes hand the request to a ReadyLister — the store's on the direct route,
+// the provider's on the proxied one — and neither builds a filter of its own.
 type readyInput struct {
 	issueops.ReadyListRequest
-
-	// filter is the request built into a storage filter. Only the proxied
-	// route's listing consumes it now; the direct listing hands the request to
-	// ReadyLister and builds nothing.
-	filter types.WorkFilter
 
 	claim        bool
 	gated        bool
@@ -172,10 +168,10 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.MaxRowsSource = maxRowsSource
 
 	// Directory-aware label scoping (GH#541) goes ON THE REQUEST, where every
-	// consumer — the ReadyLister listing, the ReadyCounter total, the
-	// ReadyClaimer claim and the proxied filter below — reads it from one
-	// place. It is derived from the client's cwd, which a server never
-	// shares, so it is resolved here and sent as an ordinary LabelsAny.
+	// consumer — the ReadyLister listing and its total, the ReadyClaimer
+	// claim, on either route — reads it from one place. It is derived from the
+	// client's cwd, which a server never shares, so it is resolved here and
+	// sent as an ordinary LabelsAny.
 	//
 	// ON THE REQUEST MEANS NORMALIZED, which is the one visible difference
 	// from the listing's old behavior: the listing used to put the configured
@@ -195,27 +191,24 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 		}
 	}
 
-	// The direct listing is on the ReadyLister role and builds nothing. The
-	// filter is built here for the proxied route's listing, from the SAME
-	// request, so the two routes cannot disagree about what was asked; it
-	// moves onto the role in the next slice. The builder also validates the
-	// request up front, so a bad --sort is reported before any mode runs.
-	filter, err := workapi.BuildReadyFilter(in.ReadyRequest)
-	if err != nil {
+	// Both listings are on the ReadyLister role and build nothing; the role
+	// builds its own filter from this request. It is built once here only to
+	// VALIDATE the request up front, so a bad --sort is reported before any
+	// mode runs — including the modes (--claim, --gated, --mol, --explain)
+	// that never reach a listing.
+	if _, err := workapi.BuildReadyFilter(in.ReadyRequest); err != nil {
 		return in, HandleErrorRespectJSON("%v", err)
 	}
-	filter.MaxRows = maxRows
-	filter.MaxRowsSource = maxRowsSource
-	in.filter = filter
 
 	return in, nil
 }
 
-// readyRoleRequest is the request `bd ready` hands the two roles that take a
-// whole ready question rather than a filter: ReadyClaimer, which claims one
-// row out of it, and ReadyCounter, which sizes it. Both routes of both
-// operations build it here, so a claim, a count and the listing beside them
-// ask ONE question no matter which door they came through.
+// readyRoleRequest is the whole ready question `bd ready` asks, without a
+// page: what ReadyClaimer claims one row out of on both routes, and what a
+// ReadyCounter would size — the number the ReadyLister's Total already is, by
+// that role's documented identity, so neither route asks a counter any more.
+// A claim and the listing beside it therefore ask ONE question no matter
+// which door they came through.
 //
 // It is the listing's request minus the two things neither role takes:
 //

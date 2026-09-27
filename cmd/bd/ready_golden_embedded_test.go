@@ -44,15 +44,7 @@ func TestEmbeddedReadyGoldenOutput(t *testing.T) {
 			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
 	}
-	// Distinct priorities where the hybrid order would otherwise fall back to
-	// creation time, so the order is a property of the data.
-	run("create", "--silent", "--id", "gd-alpha", "Alpha task", "--type", "task", "--priority", "1", "--labels", "team-a", "--estimate", "30")
-	run("create", "--silent", "--id", "gd-bug", "Crash on start", "--type", "bug", "--priority", "0", "--description", "long text that --brief drops")
-	run("create", "--silent", "--id", "gd-feat", "Shiny feature", "--type", "feature", "--priority", "2", "--assignee", "alice", "--labels", "team-a,team-b")
-	run("create", "--silent", "--id", "gd-blocked", "Blocked task", "--type", "task", "--priority", "0", "--deps", "blocked-by:gd-alpha")
-	run("create", "--silent", "--id", "gd-epic", "Big epic", "--type", "epic", "--priority", "3")
-	run("create", "--silent", "Epic child", "--type", "task", "--priority", "4", "--parent", "gd-epic")
-	run("create", "--silent", "--id", "gd-wisp", "Ephemeral step", "--type", "task", "--priority", "2", "--ephemeral")
+	seedReadyGoldenWorkspace(run)
 
 	cases := []struct {
 		name string
@@ -115,4 +107,19 @@ func normalizeReadyGolden(s string) string {
 	s = readyGoldenTimestamp.ReplaceAllString(s, "<TS>")
 	s = readyGoldenTip.ReplaceAllString(s, "")
 	return s
+}
+
+// seedReadyGoldenWorkspace creates the workspace both golden tests list: five
+// ready rows at distinct priorities, one blocked row, an epic with a child and
+// a wisp. run executes one bd command and fails the test on error.
+func seedReadyGoldenWorkspace(run func(args ...string)) {
+	// Distinct priorities where the hybrid order would otherwise fall back to
+	// creation time, so the order is a property of the data.
+	run("create", "--silent", "--id", "gd-alpha", "Alpha task", "--type", "task", "--priority", "1", "--labels", "team-a", "--estimate", "30")
+	run("create", "--silent", "--id", "gd-bug", "Crash on start", "--type", "bug", "--priority", "0", "--description", "long text that --brief drops")
+	run("create", "--silent", "--id", "gd-feat", "Shiny feature", "--type", "feature", "--priority", "2", "--assignee", "alice", "--labels", "team-a,team-b")
+	run("create", "--silent", "--id", "gd-blocked", "Blocked task", "--type", "task", "--priority", "0", "--deps", "blocked-by:gd-alpha")
+	run("create", "--silent", "--id", "gd-epic", "Big epic", "--type", "epic", "--priority", "3")
+	run("create", "--silent", "Epic child", "--type", "task", "--priority", "4", "--parent", "gd-epic")
+	run("create", "--silent", "--id", "gd-wisp", "Ephemeral step", "--type", "task", "--priority", "2", "--ephemeral")
 }

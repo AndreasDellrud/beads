@@ -360,7 +360,7 @@ linters:
       # and a reviewer can count them.
       #
       # Inside cmd/bd the rule is deny-by-default, so each entry below is a
-      # HOLE in it and carries the reason that hole exists. 59 of the 389
+      # HOLE in it and carries the reason that hole exists. 58 of the 389
       # non-test files under cmd/bd are on this list; widening it is an edit
       # here and a diff a reviewer sees. internal/httpapi has no entry and is
       # meant not to.
@@ -381,19 +381,18 @@ linters:
         text: 'do not write a filter here'
         linters:
           - forbidigo
-      # `bd ready`'s DIRECT listing is on issueops.ReadyLister, --claim on
-      # ReadyClaimer and the proxied total on ReadyCounter, all over the
-      # request rather than a filter. The filter is still nameable in these
-      # files for what is left: readyInput carries one for the PROXIED
-      # listing, which moves onto ReadyLister next; --explain builds its own
-      # fixed request through the same builder (readyExplainFilter, which names
-      # the type it returns) rather than inlining a third copy of the default -
-      # bd-3fs.3; and the blocked-issue views name the type directly for an
-      # empty filter or one carrying only a --parent id, which is the absence
-      # of a filter rather than one this command built. --gated and --mol
-      # answer a different question and short-circuit before the flags are
-      # gathered.
-      - path: '^cmd/bd/ready(_input|_proxied_server)?\.go$'
+      # `bd ready`'s listing is on issueops.ReadyLister on BOTH routes and
+      # --claim on ReadyClaimer, all over the request rather than a filter, so
+      # cmd/bd/ready_input.go left this list when the proxied listing moved
+      # onto the role. The filter is still nameable in these two files for
+      # what is left: --explain builds its own fixed request through the same
+      # builder (readyExplainFilter, which names the type it returns) rather
+      # than inlining a third copy of the default - bd-3fs.3; and the
+      # blocked-issue views name the type directly for an empty filter or one
+      # carrying only a --parent id, which is the absence of a filter rather
+      # than one this command built. --gated and --mol answer a different
+      # question and short-circuit before the flags are gathered.
+      - path: '^cmd/bd/ready(_proxied_server)?\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo

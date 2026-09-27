@@ -611,11 +611,11 @@ type IssuePage struct {
 //   - `bd ready` is NOT on THIS role, and that is a decision rather than a gap:
 //     its listing publishes a total beside the page, which is a different
 //     question from Ready's "did the limit hide anything", so it has a role of
-//     its own. The DIRECT listing is issueops.ReadyLister's — page and total
-//     in one read, over the request — and --claim is ReadyClaimer's on both
-//     routes. The PROXIED listing still runs the builder and the shared
-//     epilogue below, with ReadyCounter for its total, until it moves onto
-//     ReadyLister too. --gated, --explain and --mol answer other questions.
+//     its own. The listing is issueops.ReadyLister's on BOTH routes — page and
+//     total in one read, over the request, off the store's accessor directly
+//     and the provider's accessor under --proxied-server — and --claim is
+//     ReadyClaimer's on both routes. --gated, --explain and --mol answer other
+//     questions.
 //
 // WHAT `bd ready` DOES SHARE, stated exactly, because "not on the role" is not
 // the same as "unprotected":
@@ -623,9 +623,9 @@ type IssuePage struct {
 //   - CONSTRUCTION. Every route, and both implementations of this interface,
 //     build from these same request types through the same two builders in
 //     internal/workapi, which the builders' golden files pin.
-//   - EXECUTION, on the PROXIED route. The direct route's page and total are
-//     ReadyLister's, whose items and has-more are pinned equal to this role's
-//     Ready by its conformance contract (backend/conformance,
+//   - EXECUTION. Both routes' page and total are ReadyLister's, whose items
+//     and has-more are pinned equal to this role's Ready by its conformance
+//     contract (backend/conformance,
 //     RunReadyListerAgreesWithReadyAndCountReady).
 //
 // THE CLAIM, stated once and in full so it can be checked sentence by
@@ -633,25 +633,25 @@ type IssuePage struct {
 // role, so does `bd show --json`'s detail view on both its routes, and so does
 // `bd list`'s page on both of its — in every mode but --watch and the
 // hierarchical --parent tree, which take the filter instead. `bd ready` is not
-// on it: its direct listing is on ReadyLister, and its proxied listing shares
-// the request types above, the two builders in internal/workapi that their
-// golden files pin, and workapi.FinishPage. ENFORCED,
+// on it: its listing is on ReadyLister on both routes, which shares the
+// request types above and the two builders in internal/workapi that their
+// golden files pin. ENFORCED,
 // and by what: depguard (httpapi-transport-boundary) denies internal/workapi
 // from every non-test file of internal/httpapi, so no builder is callable
 // there, and a forbidigo rule denies naming types.IssueFilter or
 // types.WorkFilter there at all, so no filter is writable there either — both
 // are directory-scoped with no per-file exception, so a file added to that
 // package tomorrow is covered the moment it exists. That same forbidigo rule
-// covers cmd/bd deny-by-default with 59 named exceptions, so the files
+// covers cmd/bd deny-by-default with 58 named exceptions, so the files
 // implementing `bd list` and `bd show` cannot write a filter, and neither can
 // a file they are split or renamed into unless the new name lands on that
 // list. NOT ENFORCED: the rule forbids NAMING those types, not holding a
 // value, so the property is "no filter is written there", not "every filter
 // there came from a builder"; test files are exempt from both rules, because
-// the oracles hold filters in order to inspect them; `bd ready`'s files are
-// among the 59, since its proxied listing is still handed the filter and the
-// blocked-issue views and --explain in those files name one directly, so that
-// much is guarded by the builder and the golden files and not by the linter;
+// the oracles hold filters in order to inspect them; two of `bd ready`'s
+// files are among the 58, since the blocked-issue views and --explain in them
+// name a filter directly, so that much is guarded by the builder and the
+// golden files and not by the linter;
 // cmd/bd/list_show_filter_modes.go is among them too and STAYS there — the
 // count did not drop with this flip, because that file is where `bd list`'s
 // two filter-consuming modes and `bd show --current` live and all three still

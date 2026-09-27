@@ -937,6 +937,7 @@ go_test(
         "readonly_test.go",
         "ready_embedded_test.go",
         "ready_golden_embedded_test.go",
+        "ready_golden_proxied_test.go",
         "ready_input_test.go",
         "ready_lister_route_test.go",
         "ready_max_rows_proxied_test.go",

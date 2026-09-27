@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -156,3 +158,96 @@ func (s *policyChainStub) GetAllConfig(context.Context) (map[string]string, erro
 }
 
 func (s *policyChainStub) GetConfig(context.Context, string) (string, error) { return "", nil }
+
+// listerOnlyProvider is a proxied-server provider that answers ONLY the
+// ReadyLister accessor. The listing must be one call to that role, so a
+// unit of work opened for it (NewUOW) fails the test unless the case expects
+// the text route's rendering extras.
+type listerOnlyProvider struct {
+	t       *testing.T
+	listing issueops.ReadyListing
+	listed  *[]issueops.ReadyListRequest
+	allowUW bool
+}
+
+func (p listerOnlyProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
+	if !p.allowUW {
+		p.t.Error("the proxied --json listing opened a unit of work; it is one ReadyLister call")
+	}
+	return nil, errors.New("listerOnlyProvider: no unit of work")
+}
+
+func (p listerOnlyProvider) Close(context.Context) error { return nil }
+
+func (p listerOnlyProvider) ReadyLister() (issueops.ReadyLister, error) {
+	return readyListerFunc(func(_ context.Context, req issueops.ReadyListRequest) (issueops.ReadyListing, error) {
+		*p.listed = append(*p.listed, req)
+		return p.listing, nil
+	}), nil
+}
+
+type readyListerFunc func(context.Context, issueops.ReadyListRequest) (issueops.ReadyListing, error)
+
+func (f readyListerFunc) ListReady(ctx context.Context, req issueops.ReadyListRequest) (issueops.ReadyListing, error) {
+	return f(ctx, req)
+}
+
+// TestReadyProxiedRouteListsThroughTheProviderReadyLister pins U6: the
+// proxied `bd ready` listing reaches the provider's OWN ReadyLister accessor
+// exactly once with the request the command line built — the same
+// readyInput.ReadyListRequest the direct route hands the store's lister,
+// --offset included — and prints the role's page and Total. The --json route
+// opens no unit of work of its own.
+func TestReadyProxiedRouteListsThroughTheProviderReadyLister(t *testing.T) {
+	t.Setenv("BEADS_MAX_ROWS", "")
+	t.Setenv("BD_JSON_ENVELOPE", "1")
+	var listed []issueops.ReadyListRequest
+	provider := listerOnlyProvider{
+		t:      t,
+		listed: &listed,
+		listing: issueops.ReadyListing{
+			Items: []*types.IssueWithCounts{
+				{Issue: &types.Issue{ID: "bd-2", Title: "two", Status: types.StatusOpen}},
+			},
+			HasMore: true,
+			Total:   4,
+		},
+	}
+	oldProvider, oldCtx, oldJSON, oldProxied := uowProvider, rootCtx, jsonOutput, proxiedServerMode
+	t.Cleanup(func() { uowProvider, rootCtx, jsonOutput, proxiedServerMode = oldProvider, oldCtx, oldJSON, oldProxied })
+	uowProvider = provider
+	rootCtx = t.Context()
+	jsonOutput = true
+	proxiedServerMode = true
+
+	cmd := newReadyFlagsCommand(t, "--limit", "1", "--offset", "1", "--label", "a", "--sort", "oldest", "--include-ephemeral")
+	out := captureStdout(t, func() error { return runReadyProxiedServer(cmd, rootCtx) })
+
+	if len(listed) != 1 {
+		t.Fatalf("ReadyLister called %d times, want exactly 1", len(listed))
+	}
+	limit := 1
+	want := issueops.ReadyListRequest{ReadyRequest: issueops.ReadyRequest{
+		Labels:           []string{"a"},
+		LabelsAny:        []string{},
+		ExcludeLabels:    []string{},
+		ExcludeTypes:     []string{},
+		Sort:             "oldest",
+		Limit:            &limit,
+		Offset:           1,
+		IncludeEphemeral: true,
+	}}
+	if got := listed[0]; !reflect.DeepEqual(got, want) {
+		t.Errorf("request:\n got %+v\nwant %+v", got, want)
+	}
+	var envelope struct {
+		Data       []types.IssueWithCounts `json:"data"`
+		Pagination *PaginationMeta         `json:"pagination"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &envelope); err != nil {
+		t.Fatalf("parse ready JSON: %v\n%s", err, out)
+	}
+	if len(envelope.Data) != 1 || envelope.Data[0].ID != "bd-2" || envelope.Pagination == nil || envelope.Pagination.Total != 4 {
+		t.Errorf("output = %+v, pagination %+v; want bd-2 and total 4 from the role", envelope.Data, envelope.Pagination)
+	}
+}
