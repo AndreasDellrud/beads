@@ -37,6 +37,9 @@ PACKAGES = (
     "backend",  # //backend:backend_test (public alias census)
     "backend/conformance",  # //backend/conformance, //internal/storage
     "beadserrors",  # role facade alias targets
+    "cmd/bd",  # //cmd/bd:bd_test (capability registry, journal, serve scans)
+    "cmd/bd/doctor",  # //cmd/bd:bd_test (events-journal construction scan)
+    "cmd/bd/doctor/fix",  # //cmd/bd:bd_test (events-journal construction scan)
     "internal/types",  # role facade alias targets
     "issueops",  # //backend/conformance (role facade census)
     "journalops",  # //backend/conformance (role facade census)

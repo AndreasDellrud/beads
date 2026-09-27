@@ -20,6 +20,17 @@ exports_files(
     visibility = ["//scripts/gitattributespolicy:__pkg__"],
 )
 
+# //cmd/bd:bd_test: tracked git hooks (generator parity) and the formula
+# primitive fixtures.
+filegroup(
+    name = "bd_test_files",
+    srcs = glob([
+        ".githooks/*",
+        "examples/formulas/primitives/**",
+    ]),
+    visibility = ["//cmd/bd:__pkg__"],
+)
+
 exports_files(
     [".claude-plugin/marketplace.json"],
     visibility = ["//cmd/bd/setup:__pkg__"],

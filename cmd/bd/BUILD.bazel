@@ -1114,9 +1114,20 @@ go_test(
         "write_verbs_parity_test.go",
         "zz_stdio_leak_guard_test.go",
     ],
-    data = glob(["testdata/**"]) + [":bd_for_tests"],
+    data = glob(["testdata/**"]) + [
+        ":bd_for_tests",
+        ":go_srcs",
+        "//:bd_test_files",
+        "//cmd/bd/doctor:go_srcs",
+        "//cmd/bd/doctor/fix:go_srcs",
+        "//internal/storage/embeddeddolt/cmd:go_srcs",
+        "@go_sdk//:bin/gofmt",
+    ],
     embed = [":bd_lib"],
-    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)"},
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+    },
     deps = [
         "//:beads",
         "//cmd/bd/doctor",
@@ -1243,3 +1254,16 @@ exports_files(
     ["init_safety_help.go"],
     visibility = ["//test/docsync:__pkg__"],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---
