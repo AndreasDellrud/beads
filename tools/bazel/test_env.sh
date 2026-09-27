@@ -14,10 +14,19 @@
 set -euo pipefail
 
 root="$(mktemp -d /tmp/bbt.XXXXXX)"
-trap 'chmod -R u+w "$root" 2>/dev/null || true; rm -rf "$root"' EXIT
+# Cleanup must never change the test's exit status: a child the test left
+# running (a detached bd or a Dolt server shutting down) can still be writing
+# when rm runs, and Bazel only reaps it after this wrapper exits.
+trap 'chmod -R u+w "$root" 2>/dev/null || true; rm -rf "$root" 2>/dev/null || true' EXIT
 
 mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp"
 : >"$root/gitconfig"
+# Dolt identity, as beads_test_env_enter sets with `dolt config --global`:
+# tests that shell out to dolt commit need an author. Written directly so the
+# wrapper does not depend on a dolt binary.
+mkdir -p "$root/dolt-root/.dolt"
+printf '%s\n' '{"user.email":"test@beads.local","user.name":"beads-test"}' \
+	>"$root/dolt-root/.dolt/config_global.json"
 
 export HOME="$root/home"
 export USERPROFILE="$root/home"
