@@ -22,10 +22,35 @@ import (
 // Validation runs first and without IO, so a request the role would refuse
 // costs no edge read.
 
-// readyPolicy binds the policy to the edge source of one seam.
+// readyPolicy binds the policy to the edge source of one seam, and to that
+// seam's way of asking whether an issue is already closed.
 type readyPolicy struct {
 	policy *Policy
 	edges  EdgeSource
+	// closed reports whether id is already closed. The close guards ask it only
+	// for an issue an external blocker holds, so the common close pays nothing.
+	closed ClosedSource
+}
+
+// ClosedSource reports whether an issue is already closed. A miss is false.
+type ClosedSource func(ctx context.Context, id string) (bool, error)
+
+// closeRefused reports whether the external close guard refuses closing id
+// with blockers. Re-closing an ALREADY-CLOSED issue is not refused: it is the
+// idempotent no-op every close path promises (ga-ktn9pe.4.8), and an external
+// blocker that did not stop the first close has nothing left to protect.
+func closeRefused(ctx context.Context, closed ClosedSource, id string, blockers []string) (bool, error) {
+	if len(blockers) == 0 {
+		return false, nil
+	}
+	if closed == nil {
+		return true, nil
+	}
+	already, err := closed(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return !already, nil
 }
 
 // narrow returns req with every externally held-back issue excluded. req is a
@@ -178,8 +203,14 @@ func (c *policyBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBa
 	forwarded.Items = make([]issueops.BatchCloseItem, 0, len(req.Items))
 	for i, item := range req.Items {
 		if blockers := refs[item.IssueID]; !req.Force && len(blockers) > 0 {
-			outcomes[i] = issueops.CloseOutcome{IssueID: item.IssueID, Err: externallyBlocked(item.IssueID, blockers)}
-			continue
+			refused, err := closeRefused(ctx, c.policy.closed, item.IssueID, blockers)
+			if err != nil {
+				return issueops.CloseBatchResult{}, err
+			}
+			if refused {
+				outcomes[i] = issueops.CloseOutcome{IssueID: item.IssueID, Err: externallyBlocked(item.IssueID, blockers)}
+				continue
+			}
 		}
 		sent = append(sent, i)
 		forwarded.Items = append(forwarded.Items, item)

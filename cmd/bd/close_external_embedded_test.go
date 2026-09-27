@@ -62,4 +62,14 @@ func TestEmbeddedExternalCapabilityGuardsDirectClose(t *testing.T) {
 	if out, err := run("close", held.ID, "--force"); err != nil {
 		t.Fatalf("bd close --force must still bypass the external guard: %v\n%s", err, out)
 	}
+
+	// The idempotent re-close (ga-ktn9pe.4.8): the issue is closed now, and
+	// closing it again without --force is the no-op every close path promises,
+	// external blocker or not.
+	if out, err := run("close", held.ID); err != nil {
+		t.Errorf("re-closing already-closed %s without --force: %v, want the idempotent no-op\n%s", held.ID, err, out)
+	}
+	if out, err := run("update", held.ID, "--status", "closed"); err != nil {
+		t.Errorf("bd update --status closed on already-closed %s: %v, want no external refusal\n%s", held.ID, err, out)
+	}
 }

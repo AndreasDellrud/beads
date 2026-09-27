@@ -212,3 +212,71 @@ func TestExternalCapabilityGuardsEmbeddedBatchClose(t *testing.T) {
 		t.Fatalf("forced close = %+v, %v; want --force to bypass the external guard", forced.Outcomes, err)
 	}
 }
+
+// TestExternalCapabilityReCloseIsANoOpOnTheStoreArm pins the idempotent
+// re-close (ga-ktn9pe.4.8) against the external close guard on every close
+// path the store decorator hands out: an issue that is ALREADY closed and
+// carries an unsatisfied `external:` blocker re-closes as a no-op through the
+// BatchCloser, Lifecycle.Close and a Lifecycle.Update to closed, while an OPEN
+// issue with the same blocker is still refused.
+func TestExternalCapabilityReCloseIsANoOpOnTheStoreArm(t *testing.T) {
+	local := openExternalDependencyStore(t, "local")
+	ctx := t.Context()
+	for _, id := range []string{"local-done", "local-open"} {
+		if err := local.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask,
+		}, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	if err := local.CloseIssue(ctx, "local-done", "shipped", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+	for _, id := range []string{"local-done", "local-open"} {
+		if err := local.AddDependency(ctx, &types.Dependency{
+			IssueID: id, DependsOnID: "external:remote:payments", Type: types.DepBlocks,
+		}, "tester"); err != nil {
+			t.Fatalf("AddDependency(%s): %v", id, err)
+		}
+	}
+	wrapped := externaldeps.New(local, func(externaldeps.ProjectName) (string, bool) { return "", false }, nil)
+
+	closer, err := wrapped.BatchCloser()
+	if err != nil {
+		t.Fatalf("BatchCloser: %v", err)
+	}
+	result, err := closer.CloseBatch(ctx, publicops.CloseBatchRequest{
+		Actor: "tester",
+		Items: []publicops.BatchCloseItem{{IssueID: "local-done"}, {IssueID: "local-open"}},
+	})
+	if err != nil {
+		t.Fatalf("CloseBatch: %v", err)
+	}
+	if got := result.Outcomes[0]; got.Err != nil || got.Changed {
+		t.Errorf("batch re-close of closed local-done = %+v, want the no-op (no error, not changed)", got)
+	}
+	if got := result.Outcomes[1]; !errors.Is(got.Err, storage.ErrCloseBlocked) {
+		t.Errorf("batch close of open local-open = %+v, want ErrCloseBlocked", got)
+	}
+
+	lifecycle, err := wrapped.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle: %v", err)
+	}
+	if _, err := lifecycle.Close(ctx, publicops.CloseRequest{Actor: "tester", IssueID: "local-done"}); err != nil {
+		t.Errorf("Lifecycle.Close re-close of local-done: %v, want the no-op", err)
+	}
+	if _, err := lifecycle.Close(ctx, publicops.CloseRequest{Actor: "tester", IssueID: "local-open"}); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Errorf("Lifecycle.Close of open local-open: %v, want ErrCloseBlocked", err)
+	}
+	closed := publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: publicops.Status(types.StatusClosed)}}
+	if _, err := lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "tester", IssueID: "local-done", Patch: closed}); errors.Is(err, storage.ErrCloseBlocked) {
+		t.Errorf("Lifecycle.Update to closed on closed local-done: %v, want no external refusal", err)
+	}
+	if _, err := lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "tester", IssueID: "local-open", Patch: closed}); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Errorf("Lifecycle.Update to closed on open local-open: %v, want ErrCloseBlocked", err)
+	}
+	if got, _ := local.GetIssue(ctx, "local-open"); got == nil || got.Status != types.StatusOpen {
+		t.Errorf("local-open after refused closes = %v, want open", got)
+	}
+}

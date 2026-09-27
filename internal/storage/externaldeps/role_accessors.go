@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi/storereader"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -54,7 +55,16 @@ func (s *Store) ReadyLister() (issueops.ReadyLister, error) {
 // readyPolicy reads this store's edges from beneath every decorator, the same
 // source the store-level overrides use.
 func (s *Store) readyPolicy() readyPolicy {
-	return readyPolicy{policy: s.Policy, edges: s.edgeSource()}
+	return readyPolicy{policy: s.Policy, edges: s.edgeSource(), closed: s.issueClosed}
+}
+
+// issueClosed answers the re-close exemption from beneath every decorator.
+func (s *Store) issueClosed(ctx context.Context, id string) (bool, error) {
+	issue, err := s.inner.GetIssue(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return issue != nil && issue.Status == types.StatusClosed, nil
 }
 
 // IssueClaimer rejects a direct claim of externally blocked work before the

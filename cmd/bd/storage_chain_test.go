@@ -479,3 +479,9 @@ func driveReadyClaimCountClose(t *testing.T, ctx context.Context, chain storage.
 		t.Fatalf("Close: %v", err)
 	}
 }
+
+// GetIssue answers the re-close exemption the external close guard asks about
+// an externally blocked item: every issue in this stub is open.
+func (s *policyChainStub) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	return &types.Issue{ID: id, Status: types.StatusOpen}, nil
+}

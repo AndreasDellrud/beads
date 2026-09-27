@@ -152,8 +152,13 @@ func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) e
 	if err != nil {
 		return err
 	}
-	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
-		return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+	blockers := state.refsByIssue[id]
+	refused, err := closeRefused(ctx, s.issueClosed, id, blockers)
+	if err != nil {
+		return err
+	}
+	if refused {
+		return externallyBlocked(id, blockers)
 	}
 	return nil
 }

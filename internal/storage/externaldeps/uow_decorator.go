@@ -121,7 +121,13 @@ func (p *uowProvider) ReadyClaimer() (publicops.ReadyClaimer, error) {
 // readyPolicy reads the edges in a read-only unit of work of the undecorated
 // provider, one per call.
 func (p *uowProvider) readyPolicy() readyPolicy {
-	return readyPolicy{policy: p.policy, edges: p.externalEdges}
+	return readyPolicy{policy: p.policy, edges: p.externalEdges, closed: p.issueClosed}
+}
+
+func (p *uowProvider) issueClosed(ctx context.Context, id string) (bool, error) {
+	return uow.RunTxRead(ctx, p.UnitOfWorkProvider, func(ctx context.Context, uw uow.UnitOfWork) (bool, error) {
+		return closedInUOW(ctx, uw.IssueUseCase(), id)
+	})
 }
 
 func (p *uowProvider) externalEdges(ctx context.Context) (map[string][]*types.Dependency, error) {
@@ -445,10 +451,33 @@ func (u *issueUseCase) guardExternalClose(ctx context.Context, id string, force 
 	if err != nil {
 		return err
 	}
-	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
-		return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+	blockers := state.refsByIssue[id]
+	refused, err := closeRefused(ctx, u.issueClosed, id, blockers)
+	if err != nil {
+		return err
+	}
+	if refused {
+		return externallyBlocked(id, blockers)
 	}
 	return nil
+}
+
+// issueClosed answers the re-close exemption in THIS unit of work, from either
+// plane.
+func (u *issueUseCase) issueClosed(ctx context.Context, id string) (bool, error) {
+	return closedInUOW(ctx, u.IssueUseCase, id)
+}
+
+func closedInUOW(ctx context.Context, issues domain.IssueUseCase, id string) (bool, error) {
+	issue, err := issues.GetIssue(ctx, id)
+	if err != nil || issue == nil {
+		// A miss on the issues plane is not an answer: the id may be a wisp.
+		if wisp, werr := issues.GetWisp(ctx, id); werr == nil && wisp != nil {
+			return wisp.Status == types.StatusClosed, nil
+		}
+		return false, nil
+	}
+	return issue.Status == types.StatusClosed, nil
 }
 
 type dependencyUseCase struct {
