@@ -475,7 +475,9 @@ go_binary(
 
 go_test(
     name = "bd_test",
-    # -race -short runs ~10 min (pr-core gives go test -timeout=30m).
+    # -race -short runs ~4-10 min unsharded (pr-core gives go test
+    # -timeout=30m). Bazel shards by test count, not duration; test re-execs
+    # strip the shard variables (bazeltest.ShardFreeEnv).
     size = "large",
     timeout = "long",
     srcs = [
@@ -1130,6 +1132,7 @@ go_test(
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
     },
+    shard_count = 16,
     deps = [
         "//:beads",
         "//cmd/bd/doctor",
