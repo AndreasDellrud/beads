@@ -16,7 +16,21 @@ import (
 // and before any test, and that framework swap is not a leak (#5881).
 func TestZZStdioNotLeaked(t *testing.T) {
 	if baselineStdout == nil || baselineStderr == nil {
-		t.Skip("stdio baseline not captured (TestAAAStdioBaseline filtered out); nothing to compare against")
+		// TestAAAStdioBaseline did not run in this process: -run filtered it
+		// out, or Bazel sharding put it in another shard. Fall back to the
+		// descriptors: a leaked capture leaves a pipe in place of fd 1/2. The
+		// framework's -json swap only points os.Stderr at os.Stdout (fd 1).
+		if os.Stdout.Fd() != 1 {
+			t.Errorf("os.Stdout was leaked by an earlier test (now fd=%d name=%q); "+
+				"a capture helper restored it on the happy path only - move the restore into a defer",
+				os.Stdout.Fd(), os.Stdout.Name())
+		}
+		if fd := os.Stderr.Fd(); fd != 2 && os.Stderr != os.Stdout {
+			t.Errorf("os.Stderr was leaked by an earlier test (now fd=%d name=%q); "+
+				"a capture helper restored it on the happy path only - move the restore into a defer",
+				fd, os.Stderr.Name())
+		}
+		return
 	}
 	if os.Stdout != baselineStdout {
 		t.Errorf("os.Stdout was leaked by an earlier test (now fd=%d name=%q); "+
