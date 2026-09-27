@@ -103,7 +103,11 @@ func TestProxiedServerContinueStepClaimHonorsExternalBlockers(t *testing.T) {
 		t.Fatalf("bd dep add: %v\n%s\n%s", err, stdout, stderr)
 	}
 
-	bdProxiedClose(t, bd, p.dir, heldFirst.ID, "--continue")
+	out := bdProxiedClose(t, bd, p.dir, heldFirst.ID, "--continue")
+	// Nor does it suggest claiming it: `bd update --claim` refuses it too.
+	if strings.Contains(out, "bd update "+held.ID+" --claim") || !strings.Contains(out, "external dependency") {
+		t.Errorf("--continue output for an externally held next step:\n%s\nwant no claim hint, and the reason", out)
+	}
 	bdProxiedClose(t, bd, p.dir, freeFirst.ID, "--continue")
 	db := openProxiedDB(t, p)
 	if got, who := readStatus(t, db, held.ID), readAssignee(t, db, held.ID); got != types.StatusOpen || who != "" {

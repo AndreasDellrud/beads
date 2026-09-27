@@ -148,9 +148,13 @@ func TestEmbeddedExternalCapabilityGuardsContinueStepClaim(t *testing.T) {
 		t.Fatalf("bd dep add: %v\n%s", err, out)
 	}
 
-	_ = bdClose(t, bd, dir, heldFirst.ID, "--continue")
+	out := bdClose(t, bd, dir, heldFirst.ID, "--continue")
 	if got := bdShow(t, bd, dir, held.ID); got.Status != types.StatusOpen || got.Assignee != "" {
 		t.Errorf("--continue claimed externally blocked step %s (status=%s assignee=%q)", held.ID, got.Status, got.Assignee)
+	}
+	// Nor does it suggest claiming it: `bd update --claim` refuses it too.
+	if strings.Contains(out, "bd update "+held.ID+" --claim") || !strings.Contains(out, "external dependency") {
+		t.Errorf("--continue output for an externally held next step:\n%s\nwant no claim hint, and the reason", out)
 	}
 	_ = bdClose(t, bd, dir, freeFirst.ID, "--continue")
 	if got := bdShow(t, bd, dir, free.ID); got.Status != types.StatusInProgress {

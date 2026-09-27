@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -585,6 +587,11 @@ type ContinueResult struct {
 	AutoAdvanced bool         `json:"auto_advanced"`
 	MolComplete  bool         `json:"molecule_complete"`
 	MoleculeID   string       `json:"molecule_id,omitempty"`
+
+	// heldSteps are the ready steps the auto-claim skipped because an
+	// unsatisfied `external:` dependency holds them (ErrClaimBlocked). When
+	// every ready step is held there is no step to suggest claiming.
+	heldSteps []string
 }
 
 // AdvanceToNextStep finds the next ready step in a molecule after closing a step.
@@ -645,17 +652,39 @@ func AdvanceToNextStep(ctx context.Context, s molWriter, closedStepID string, au
 	result.NextStep = readySteps[0]
 
 	if autoClaim {
-		for _, candidate := range readySteps {
-			if err := s.ClaimStepIfOpen(ctx, candidate.ID, actorName); err == nil {
-				result.NextStep = candidate
-				result.AutoAdvanced = true
-				break
-			}
-			// This candidate was already claimed; try the next ready step
-		}
+		result.NextStep, result.AutoAdvanced, result.heldSteps = claimNextReadyStep(ctx, s, readySteps, actorName)
 	}
 
 	return result, nil
+}
+
+// stepClaimer is the one molWriter method claimNextReadyStep needs.
+type stepClaimer interface {
+	ClaimStepIfOpen(ctx context.Context, id, actor string) error
+}
+
+// claimNextReadyStep claims the first of readySteps that s lets actor claim.
+// When none can be claimed, next is the first step the external-dependency
+// guard did NOT refuse — one a concurrent agent took, which is still the
+// molecule's next step — or nil when the guard refused every one, so the
+// caller never suggests claiming a step that `bd update --claim` would refuse
+// too. held lists the steps the guard refused.
+func claimNextReadyStep(ctx context.Context, s stepClaimer, readySteps []*types.Issue, actor string) (next *types.Issue, claimed bool, held []string) {
+	for _, candidate := range readySteps {
+		err := s.ClaimStepIfOpen(ctx, candidate.ID, actor)
+		if err == nil {
+			return candidate, true, held
+		}
+		if errors.Is(err, storage.ErrClaimBlocked) {
+			held = append(held, candidate.ID)
+			continue
+		}
+		// This candidate was already claimed; try the next ready step.
+		if next == nil {
+			next = candidate
+		}
+	}
+	return next, false, held
 }
 
 // PrintContinueResult prints the result of advancing to the next step
@@ -671,6 +700,10 @@ func PrintContinueResult(result *ContinueResult) {
 	}
 
 	if result.NextStep == nil {
+		if len(result.heldSteps) > 0 {
+			fmt.Printf("\nNo claimable steps in molecule: every ready step (%s) is held by an unsatisfied external dependency.\n", strings.Join(result.heldSteps, ", "))
+			return
+		}
 		fmt.Println("\nNo ready steps in molecule (may be blocked).")
 		return
 	}

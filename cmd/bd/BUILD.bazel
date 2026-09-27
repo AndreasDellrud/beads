@@ -864,6 +864,7 @@ go_test(
         "mol_bond_proxied_integration_test.go",
         "mol_bond_test.go",
         "mol_burn_proxied_integration_test.go",
+        "mol_continue_hint_test.go",
         "mol_current_proxied_integration_test.go",
         "mol_distill_proxied_integration_test.go",
         "mol_distill_test.go",
