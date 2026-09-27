@@ -787,6 +787,34 @@ func (u *issueUseCase) ClaimWispIfOpen(ctx context.Context, id, actor string) (d
 	return u.IssueUseCase.ClaimWispIfOpen(ctx, id, actor)
 }
 
+// GuardClaimInUOW answers, without claiming, whether the external-dependency
+// guard would refuse claiming id in uw: ErrClaimBlocked (which wraps
+// ErrNotClaimable) when uw's decorator chain carries this package's policy and
+// an unsatisfied `external:` blocker holds id, nil otherwise — an unpoliced
+// unit of work answers nil, as GuardClaim does for an unpoliced store.
+//
+// It is the check ClaimIssueIfOpen / ClaimWispIfOpen make before claiming, for
+// a caller that only SUGGESTS a claim (`bd close --continue --no-auto`) and
+// must not suggest one the claim would refuse. It reads only id's own edges in
+// uw; a caller that PreResolve'd id opens no foreign project here, and a ref
+// the pre-resolution did not see fails closed.
+func GuardClaimInUOW(ctx context.Context, uw uow.UnitOfWork, id string) error {
+	for uw != nil {
+		if policy, ok := uw.(*unitOfWork); ok {
+			if issues, ok := policy.IssueUseCase().(*issueUseCase); ok {
+				return issues.guardExternalClaim(ctx, id)
+			}
+			return nil
+		}
+		inner, ok := uw.(interface{ Unwrap() uow.UnitOfWork })
+		if !ok {
+			return nil
+		}
+		uw = inner.Unwrap()
+	}
+	return nil
+}
+
 // guardExternalClaim refuses claiming id while an unsatisfied external blocker
 // holds it back. There is no force bypass: a claim is not a close, and neither
 // ReadyClaimer nor the claim-by-id role has ever offered one.

@@ -649,13 +649,42 @@ func AdvanceToNextStep(ctx context.Context, s molWriter, closedStepID string, au
 		return result, nil
 	}
 
-	result.NextStep = readySteps[0]
-
 	if autoClaim {
 		result.NextStep, result.AutoAdvanced, result.heldSteps = claimNextReadyStep(ctx, s, readySteps, actorName)
+	} else {
+		result.NextStep, result.heldSteps = suggestNextReadyStep(ctx, s, readySteps)
 	}
 
 	return result, nil
+}
+
+// stepClaimGuard is implemented by molecule writers that can answer, without
+// claiming, whether ClaimStepIfOpen's external-dependency guard would refuse a
+// step (ErrClaimBlocked).
+type stepClaimGuard interface {
+	GuardStepClaim(ctx context.Context, id string) error
+}
+
+// suggestNextReadyStep is claimNextReadyStep for `--no-auto`: nothing is
+// claimed, and the step suggested is the first of readySteps the
+// external-dependency guard does not refuse — nil, with every step listed in
+// held, when it refuses them all — so the "bd update <step> --claim" hint
+// never names a step that command would refuse. A writer without the guard
+// suggests the first ready step. A guard that fails for another reason does
+// not hold the step back: the claim itself will report that error.
+func suggestNextReadyStep(ctx context.Context, s any, readySteps []*types.Issue) (next *types.Issue, held []string) {
+	guard, ok := s.(stepClaimGuard)
+	if !ok {
+		return readySteps[0], nil
+	}
+	for _, candidate := range readySteps {
+		if err := guard.GuardStepClaim(ctx, candidate.ID); errors.Is(err, storage.ErrClaimBlocked) {
+			held = append(held, candidate.ID)
+			continue
+		}
+		return candidate, held
+	}
+	return nil, held
 }
 
 // stepClaimer is the one molWriter method claimNextReadyStep needs.

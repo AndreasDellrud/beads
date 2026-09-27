@@ -85,3 +85,70 @@ func TestContinueNeverSuggestsClaimingAnExternallyHeldStep(t *testing.T) {
 		}
 	})
 }
+
+// guardingStepClaimer answers GuardStepClaim from a per-step verdict and
+// fails the test if anything is claimed.
+type guardingStepClaimer struct {
+	t       *testing.T
+	refuse  map[string]error
+	guarded []string
+}
+
+func (c *guardingStepClaimer) GuardStepClaim(_ context.Context, id string) error {
+	c.guarded = append(c.guarded, id)
+	return c.refuse[id]
+}
+
+func (c *guardingStepClaimer) ClaimStepIfOpen(_ context.Context, id, _ string) error {
+	c.t.Errorf("--no-auto claimed %s", id)
+	return nil
+}
+
+// TestContinueNoAutoNeverSuggestsAnExternallyHeldStep is the `--no-auto`
+// counterpart: nothing is claimed, the step suggested is the first the guard
+// does not refuse, and when it refuses every ready step none is suggested. It
+// used to suggest readySteps[0] unconditionally.
+func TestContinueNoAutoNeverSuggestsAnExternallyHeldStep(t *testing.T) {
+	steps := []*types.Issue{{ID: "mx-1", Title: "one"}, {ID: "mx-2", Title: "two"}, {ID: "mx-3", Title: "three"}}
+
+	t.Run("suggests the first step past the held ones", func(t *testing.T) {
+		c := &guardingStepClaimer{t: t, refuse: map[string]error{"mx-1": externallyHeldStep("mx-1")}}
+		next, held := suggestNextReadyStep(t.Context(), c, steps)
+		if next == nil || next.ID != "mx-2" || !slices.Equal(held, []string{"mx-1"}) {
+			t.Fatalf("next=%s held=%v, want mx-2 past held [mx-1]", stepIDOf(next), held)
+		}
+		if !slices.Equal(c.guarded, []string{"mx-1", "mx-2"}) {
+			t.Errorf("guarded %v, want the steps up to the first unrefused one", c.guarded)
+		}
+	})
+
+	t.Run("a guard error other than the refusal does not hold the step", func(t *testing.T) {
+		c := &guardingStepClaimer{t: t, refuse: map[string]error{"mx-1": errors.New("read failed")}}
+		if next, held := suggestNextReadyStep(t.Context(), c, steps); next == nil || next.ID != "mx-1" || len(held) != 0 {
+			t.Fatalf("next=%s held=%v, want mx-1", stepIDOf(next), held)
+		}
+	})
+
+	t.Run("every step held: no step suggested, and the output says why", func(t *testing.T) {
+		c := &guardingStepClaimer{t: t, refuse: map[string]error{
+			"mx-1": externallyHeldStep("mx-1"), "mx-2": externallyHeldStep("mx-2"), "mx-3": externallyHeldStep("mx-3"),
+		}}
+		next, held := suggestNextReadyStep(t.Context(), c, steps)
+		if next != nil {
+			t.Fatalf("next=%s, want none when the guard refuses every step", stepIDOf(next))
+		}
+		out := captureStdout(t, func() error {
+			PrintContinueResult(&ContinueResult{MoleculeID: "mx", NextStep: next, heldSteps: held})
+			return nil
+		})
+		if strings.Contains(out, "--claim") || !strings.Contains(out, "No claimable steps") || !strings.Contains(out, "mx-1, mx-2, mx-3") {
+			t.Errorf("output:\n%s\nwant the no-claimable-steps reason and no claim hint", out)
+		}
+	})
+
+	t.Run("a writer without the guard suggests the first ready step", func(t *testing.T) {
+		if next, held := suggestNextReadyStep(t.Context(), &refusingStepClaimer{}, steps); next == nil || next.ID != "mx-1" || held != nil {
+			t.Fatalf("next=%s held=%v, want mx-1", stepIDOf(next), held)
+		}
+	})
+}

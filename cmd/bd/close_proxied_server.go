@@ -505,13 +505,15 @@ func closeProxiedRunPostClose(ctx context.Context, args []string, in closeProxie
 }
 
 // closeProxiedPostCloseProvider is the provider the post-close transaction
-// runs on. When --continue will auto-claim a step, the external-dependency
-// policy guards that claim inside the transaction (ClaimIssueIfOpen /
-// ClaimWispIfOpen); the candidate steps' `external:` refs are resolved here,
-// in a read before it, so the claim opens no foreign project while the write
+// runs on. With --continue the external-dependency policy is asked about the
+// candidate steps inside the transaction: the auto-claim's guard
+// (ClaimIssueIfOpen / ClaimWispIfOpen), or with --no-auto the same check made
+// without claiming (GuardClaimInUOW), so the suggested step is one the claim
+// would not refuse. The candidates' `external:` refs are resolved here, in a
+// read before it, so neither opens a foreign project while the write
 // transaction holds its connection.
 func closeProxiedPostCloseProvider(ctx context.Context, args []string, in closeProxiedInput) (uow.UnitOfWorkProvider, error) {
-	if !in.continueOn || in.noAuto || len(args) != 1 {
+	if !in.continueOn || len(args) != 1 {
 		return uowProvider, nil
 	}
 	candidates, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]string, error) {

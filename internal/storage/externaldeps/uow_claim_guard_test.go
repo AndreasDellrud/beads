@@ -209,3 +209,43 @@ func TestClaimByIDRefusesTheSameSetOnBothArms(t *testing.T) {
 		t.Fatalf("uow arm, no external blocker: %v", err)
 	}
 }
+
+// wrappingUOW stands for an outer unit-of-work decorator (the notifying
+// layer) over the policy's.
+type wrappingUOW struct{ uow.UnitOfWork }
+
+func (w wrappingUOW) Unwrap() uow.UnitOfWork { return w.UnitOfWork }
+
+// TestGuardClaimInUOWAnswersWithoutClaiming pins the check `bd close --continue
+// --no-auto` makes before suggesting a step: ErrClaimBlocked for a step an
+// unsatisfied `external:` blocker holds, nil for a free one, found through an
+// outer decorator, with nothing claimed and only the step's own edges read. A
+// unit of work without the policy answers nil.
+func TestGuardClaimInUOWAnswersWithoutClaiming(t *testing.T) {
+	blocked, free := issue("be-blocked"), issue("be-free")
+	deps := &countingDependencyUseCase{fakeDependencyUseCase: &fakeDependencyUseCase{external: map[string][]*types.Dependency{
+		blocked.ID: {externalDep(blocked.ID, "external:remote:payments", types.DepBlocks)},
+	}}}
+	inner := &fakeUOW{issues: &fakeIssueUseCase{ready: []*types.Issue{blocked, free}}, deps: deps}
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: inner}, func(ProjectName) (string, bool) { return "", false }, nil)
+	uw, err := provider.NewUOW(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := GuardClaimInUOW(t.Context(), wrappingUOW{uw}, blocked.ID); !errors.Is(err, storage.ErrClaimBlocked) {
+		t.Errorf("GuardClaimInUOW(%s) = %v, want ErrClaimBlocked", blocked.ID, err)
+	}
+	if err := GuardClaimInUOW(t.Context(), wrappingUOW{uw}, free.ID); err != nil {
+		t.Errorf("GuardClaimInUOW(%s) = %v, want nil", free.ID, err)
+	}
+	if blocked.Assignee != "" || free.Assignee != "" {
+		t.Errorf("the check claimed: %s=%q %s=%q", blocked.ID, blocked.Assignee, free.ID, free.Assignee)
+	}
+	if !slices.EqualFunc(deps.ownIDs, [][]string{{blocked.ID}, {free.ID}}, slices.Equal) {
+		t.Errorf("own-edge reads %v, want each step's own", deps.ownIDs)
+	}
+	assertReads(t, "GuardClaimInUOW", deps, 0)
+	if err := GuardClaimInUOW(t.Context(), inner, blocked.ID); err != nil {
+		t.Errorf("GuardClaimInUOW on an unpoliced unit of work = %v, want nil", err)
+	}
+}

@@ -124,7 +124,8 @@ func TestEmbeddedExternalCapabilityGuardsUpdateClaim(t *testing.T) {
 // a claim inside a transaction the store chain's policy cannot see). Molecule
 // step readiness is computed from within-molecule edges only, so the next step
 // an unsatisfied `external:` blocker holds looked ready and was claimed. It is
-// not claimed now; an unblocked next step still is.
+// not claimed now; an unblocked next step still is. With --no-auto nothing is
+// claimed and the hint names only a step the guard does not refuse.
 func TestEmbeddedExternalCapabilityGuardsContinueStepClaim(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -141,14 +142,35 @@ func TestEmbeddedExternalCapabilityGuardsContinueStepClaim(t *testing.T) {
 	}
 	heldFirst, held := molecule("Held")
 	freeFirst, free := molecule("Free")
-	cmd := exec.Command(bd, "dep", "add", held.ID, "external:remote:payments")
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd dep add: %v\n%s", err, out)
+	heldNoAutoFirst, heldNoAuto := molecule("HeldNoAuto")
+	freeNoAutoFirst, freeNoAuto := molecule("FreeNoAuto")
+	for _, id := range []string{held.ID, heldNoAuto.ID} {
+		cmd := exec.Command(bd, "dep", "add", id, "external:remote:payments")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd dep add: %v\n%s", err, out)
+		}
 	}
 
-	out := bdClose(t, bd, dir, heldFirst.ID, "--continue")
+	// --no-auto claims nothing, and suggests only a step the claim would not
+	// refuse: none when the external guard holds every ready step.
+	out := bdClose(t, bd, dir, heldNoAutoFirst.ID, "--continue", "--no-auto")
+	if strings.Contains(out, "--claim") || !strings.Contains(out, "No claimable steps") || !strings.Contains(out, heldNoAuto.ID) {
+		t.Errorf("--continue --no-auto output for an externally held next step:\n%s\nwant no claim hint, and the reason", out)
+	}
+	if got := bdShow(t, bd, dir, heldNoAuto.ID); got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("--no-auto claimed %s (status=%s assignee=%q)", heldNoAuto.ID, got.Status, got.Assignee)
+	}
+	out = bdClose(t, bd, dir, freeNoAutoFirst.ID, "--continue", "--no-auto")
+	if !strings.Contains(out, "bd update "+freeNoAuto.ID+" --claim") {
+		t.Errorf("--continue --no-auto output for an unblocked next step:\n%s\nwant the claim hint for %s", out, freeNoAuto.ID)
+	}
+	if got := bdShow(t, bd, dir, freeNoAuto.ID); got.Status != types.StatusOpen {
+		t.Errorf("--no-auto claimed %s (status=%s)", freeNoAuto.ID, got.Status)
+	}
+
+	out = bdClose(t, bd, dir, heldFirst.ID, "--continue")
 	if got := bdShow(t, bd, dir, held.ID); got.Status != types.StatusOpen || got.Assignee != "" {
 		t.Errorf("--continue claimed externally blocked step %s (status=%s assignee=%q)", held.ID, got.Status, got.Assignee)
 	}

@@ -122,6 +122,13 @@ func (w storeMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) e
 	})
 }
 
+// GuardStepClaim reports, without claiming, whether ClaimStepIfOpen's
+// external-dependency guard would refuse id (ErrClaimBlocked), so
+// `bd close --continue --no-auto` never suggests a step that claim refuses.
+func (w storeMolWriter) GuardStepClaim(ctx context.Context, id string) error {
+	return externaldeps.GuardClaim(ctx, w.DoltStorage, id)
+}
+
 func newStandaloneStoreMolWriter(store storage.DoltStorage) storeMolWriter {
 	return storeMolWriter{DoltStorage: store}
 }
@@ -461,6 +468,12 @@ func (w *uowMolWriter) DeleteIssue(ctx context.Context, id, actor string) error 
 
 func (w *uowMolWriter) SetConfig(ctx context.Context, key, value string) error {
 	return w.uw.ConfigUseCase().SetConfig(ctx, key, value)
+}
+
+// GuardStepClaim is storeMolWriter.GuardStepClaim for the unit-of-work port:
+// the check ClaimStepIfOpen's policy override makes, without the claim.
+func (w *uowMolWriter) GuardStepClaim(ctx context.Context, id string) error {
+	return externaldeps.GuardClaimInUOW(ctx, w.uw, id)
 }
 
 func (w *uowMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
