@@ -33,6 +33,7 @@ go_test(
         "claim_if_open_guard_test.go",
         "decorator_test.go",
         "fake_roles_test.go",
+        "forced_update_close_test.go",
         "policy_roles_test.go",
         "ready_wake_test.go",
         "uow_claim_guard_test.go",

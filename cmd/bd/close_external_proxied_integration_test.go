@@ -113,3 +113,34 @@ func TestProxiedServerContinueStepClaimHonorsExternalBlockers(t *testing.T) {
 		t.Errorf("--continue did not advance to the unblocked step %s (status=%s)", free.ID, got)
 	}
 }
+
+// TestProxiedServerForcedStatusCloseBypassesExternalBlockers pins `bd update
+// --status closed --force` over a proxied server: the policy's ApplyUpdate
+// override ignored ForceClosePolicy, so the forced close was refused here
+// while the direct route (and `bd close --force` on both) let it through.
+// Unforced, it is still refused.
+func TestProxiedServerForcedStatusCloseBypassesExternalBlockers(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "cxf")
+
+	held := bdProxiedCreate(t, bd, p.dir, "Waits for payments", "--priority", "0")
+	if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "dep", "add", held.ID, "external:remote:payments"); err != nil {
+		t.Fatalf("bd dep add: %v\n%s\n%s", err, stdout, stderr)
+	}
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", held.ID, "--status", "closed")
+	if err == nil || !strings.Contains(stdout+stderr, "external:remote:payments") {
+		t.Errorf("unforced bd update --status closed: err=%v, want a refusal naming the blocker\n%s\n%s", err, stdout, stderr)
+	}
+	db := openProxiedDB(t, p)
+	if got := readStatus(t, db, held.ID); got != types.StatusOpen {
+		t.Fatalf("refused update left %s %s, want open", held.ID, got)
+	}
+	if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", held.ID, "--status", "closed", "--force"); err != nil {
+		t.Fatalf("bd update --status closed --force: %v\n%s\n%s", err, stdout, stderr)
+	}
+	if got := readStatus(t, db, held.ID); got != types.StatusClosed {
+		t.Errorf("forced update left %s %s, want closed", held.ID, got)
+	}
+}

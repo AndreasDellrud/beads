@@ -100,6 +100,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates, deletes and demote-to-wisp.
 
 
+- **`bd update --status closed --force` honors `--force` against an
+  `external:` blocker on the `--proxied-server` route** (and `PATCH
+  /v0/beads/issues/{id}` with `force_close_policy` on `bd serve`'s provider
+  arm). The unit-of-work policy ignored the force and refused the close that
+  the direct route and `bd close --force` on both routes allow.
+
 - **`bd close --continue` no longer auto-claims a molecule step an
   unsatisfied `external:` dependency holds back.** Step readiness is computed
   from the molecule's own edges, so such a step looked ready and was marked

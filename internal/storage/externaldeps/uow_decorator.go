@@ -186,8 +186,9 @@ func (l *resolvingLifecycle) Create(ctx context.Context, req publicops.CreateReq
 
 func (l *resolvingLifecycle) Update(ctx context.Context, req publicops.UpdateRequest) (publicops.UpdateResult, error) {
 	guarded := ""
-	if req.Claim || (req.Patch.Status.Set && req.Patch.Status.Value == types.StatusClosed) {
-		guarded = req.IssueID
+	closing := req.Patch.Status.Set && req.Patch.Status.Value == types.StatusClosed && !req.ForceClosePolicy
+	if req.Claim || closing {
+		guarded = req.IssueID // a forced close is not guarded, so alone it resolves nothing
 	}
 	ops, err := l.ops(ctx, guarded)
 	if err != nil {
@@ -815,7 +816,11 @@ func (u *issueUseCase) ApplyUpdate(ctx context.Context, id string, spec domain.U
 		}
 	}
 	if isClosedUpdate(spec.Fields) {
-		if err := u.guardExternalClose(ctx, id, false); err != nil {
+		// ForceClosePolicy (`bd update --status closed --force`, PATCH's
+		// force_close_policy) reaches here as the OpForceClosePolicy marker; it
+		// used to be ignored, so this arm refused a forced close the store arm's
+		// lifecycle and every close route let through.
+		if err := u.guardExternalClose(ctx, id, forcedUpdate(spec.Fields)); err != nil {
 			return nil, err
 		}
 	}
