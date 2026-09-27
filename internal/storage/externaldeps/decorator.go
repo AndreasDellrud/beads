@@ -145,7 +145,18 @@ func (l *lifecycle) Create(ctx context.Context, request publicops.CreateRequest)
 	return l.inner.Create(ctx, request)
 }
 
+// Update guards a claim (request.Claim, `bd update --claim`) and a close
+// (a status patch to closed). The inner lifecycle claims through the backend's
+// own compare-and-set, which knows nothing of `external:` edges, so without
+// the claim half `bd update --claim` took externally blocked work on this arm
+// while `bd ready --claim` and the claim-by-id role refused it. A claim has no
+// force bypass; ForceClosePolicy applies to the close half only.
 func (l *lifecycle) Update(ctx context.Context, request publicops.UpdateRequest) (publicops.UpdateResult, error) {
+	if request.Claim {
+		if err := l.policy.guardExternalClaim(ctx, request.IssueID); err != nil {
+			return publicops.UpdateResult{}, err
+		}
+	}
 	if request.Patch.Status.Set && string(request.Patch.Status.Value) == string(types.StatusClosed) {
 		if err := l.policy.guardExternalClose(ctx, request.IssueID, request.ForceClosePolicy); err != nil {
 			return publicops.UpdateResult{}, err
@@ -163,6 +174,20 @@ func (l *lifecycle) Close(ctx context.Context, request publicops.CloseRequest) (
 
 func (l *lifecycle) Reopen(ctx context.Context, request publicops.ReopenRequest) (publicops.ReopenResult, error) {
 	return l.inner.Reopen(ctx, request)
+}
+
+// guardExternalClaim refuses claiming id while an unsatisfied external blocker
+// holds it back. The store arm has no transaction to share with the claim, so
+// this reads as of the call, like every other store-arm guard.
+func (s *Store) guardExternalClaim(ctx context.Context, id string) error {
+	state, err := s.loadBlockingState(ctx)
+	if err != nil {
+		return err
+	}
+	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
+		return externallyBlocked(id, blockers)
+	}
+	return nil
 }
 
 func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) error {

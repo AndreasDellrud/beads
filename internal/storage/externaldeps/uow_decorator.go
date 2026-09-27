@@ -94,9 +94,11 @@ func (p *uowProvider) IssueReader() (publicops.Reader, error) {
 
 // IssueClaimer builds the claim-by-id role over THIS wrapper, so its unit of
 // work's IssueUseCase is the policy's and ClaimIssue below refuses externally
-// blocked work inside the claim's own transaction. That override is what
-// covers every caller — this accessor, `bd update --claim` over a proxied
-// server, and any raw-UOW caller — rather than a guard layered on the role.
+// blocked work inside the claim's own transaction. That override covers this
+// accessor and any raw-UOW caller of ClaimIssue/ClaimWisp. `bd update --claim`
+// does NOT reach it: the lifecycle's Update runs ApplyUpdate, whose claim
+// calls the undecorated use case's own ClaimIssue, so ApplyUpdate below
+// carries the same guard for a spec with Claim set.
 func (p *uowProvider) IssueClaimer() (publicops.Claimer, error)     { return uow.NewIssueClaimer(p) }
 func (p *uowProvider) IssueRelations() (publicops.Relations, error) { return uow.NewIssueRelations(p) }
 func (p *uowProvider) EdgeReader() (publicops.EdgeReader, error)    { return uow.NewEdgeReader(p) }
@@ -417,18 +419,40 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 // ClaimIssue refuses a claim-by-id of an issue an unsatisfied external blocker
 // holds back, reading the edges in THIS unit of work before the compare-and-set
 // runs in it. The store arm has always refused this (externaldeps.Store's
-// IssueClaimer); without the override the unit-of-work arm — proxied `bd
-// update --claim`, and serve's provider arm, whose claim role is built over
-// this provider — claimed it.
+// IssueClaimer); without the override the unit-of-work arm's claim role —
+// serve's provider arm builds it over this provider — claimed it.
+//
+// It does NOT cover `bd update --claim`, whatever this comment used to say:
+// that path is Lifecycle.Update -> ApplyUpdate, and the undecorated
+// ApplyUpdate calls its OWN ClaimIssue, not this override. ApplyUpdate below
+// guards a Claim spec itself.
 func (u *issueUseCase) ClaimIssue(ctx context.Context, id, actor string) (domain.ClaimResult, error) {
-	state, err := u.blockingState(ctx)
-	if err != nil {
+	if err := u.guardExternalClaim(ctx, id); err != nil {
 		return domain.ClaimResult{}, err
 	}
-	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
-		return domain.ClaimResult{}, externallyBlocked(id, blockers)
-	}
 	return u.IssueUseCase.ClaimIssue(ctx, id, actor)
+}
+
+// ClaimWisp is ClaimIssue's guard for the ephemeral plane.
+func (u *issueUseCase) ClaimWisp(ctx context.Context, id, actor string) (domain.ClaimResult, error) {
+	if err := u.guardExternalClaim(ctx, id); err != nil {
+		return domain.ClaimResult{}, err
+	}
+	return u.IssueUseCase.ClaimWisp(ctx, id, actor)
+}
+
+// guardExternalClaim refuses claiming id while an unsatisfied external blocker
+// holds it back. There is no force bypass: a claim is not a close, and neither
+// ReadyClaimer nor the claim-by-id role has ever offered one.
+func (u *issueUseCase) guardExternalClaim(ctx context.Context, id string) error {
+	state, err := u.blockingState(ctx)
+	if err != nil {
+		return err
+	}
+	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
+		return externallyBlocked(id, blockers)
+	}
+	return nil
 }
 
 func (u *issueUseCase) CloseIssueChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {
@@ -445,7 +469,16 @@ func (u *issueUseCase) CloseWispChecked(ctx context.Context, id string, params d
 	return u.IssueUseCase.CloseWispChecked(ctx, id, params, actor, force)
 }
 
+// ApplyUpdate guards the two policy-relevant things an update can do: claim
+// (spec.Claim — `bd update --claim` and Lifecycle.Update's Claim, which the
+// undecorated body claims through its own ClaimIssue rather than the override
+// above) and close. Both checks run in THIS unit of work, before the update.
 func (u *issueUseCase) ApplyUpdate(ctx context.Context, id string, spec domain.UpdateSpec, actor string) (*types.Issue, error) {
+	if spec.Claim {
+		if err := u.guardExternalClaim(ctx, id); err != nil {
+			return nil, err
+		}
+	}
 	if isClosedUpdate(spec.Fields) {
 		if err := u.guardExternalClose(ctx, id, false); err != nil {
 			return nil, err

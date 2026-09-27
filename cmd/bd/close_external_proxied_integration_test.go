@@ -45,3 +45,38 @@ func TestProxiedServerCloseHonorsExternalBlockers(t *testing.T) {
 	bdProxiedClose(t, bd, p.dir, held.ID, "--force")
 	bdProxiedClose(t, bd, p.dir, held.ID)
 }
+
+// TestProxiedServerUpdateClaimHonorsExternalBlockers pins `bd update --claim`
+// over a proxied server: Lifecycle.Update with Claim set, which reaches
+// ApplyUpdate and used to claim through the undecorated body's own ClaimIssue,
+// past the policy. An externally blocked issue is refused (nonzero, the
+// blocker named, nothing written) with or without --force; an unblocked one
+// claims.
+func TestProxiedServerUpdateClaimHonorsExternalBlockers(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "cxu")
+
+	held := bdProxiedCreate(t, bd, p.dir, "Waits for payments", "--priority", "0")
+	free := bdProxiedCreate(t, bd, p.dir, "Free work", "--priority", "2")
+	if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "dep", "add", held.ID, "external:remote:payments"); err != nil {
+		t.Fatalf("bd dep add: %v\n%s\n%s", err, stdout, stderr)
+	}
+
+	for _, args := range [][]string{{"update", held.ID, "--claim"}, {"update", held.ID, "--claim", "--force"}} {
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+		if err == nil || !strings.Contains(stdout+stderr, "external:remote:payments") {
+			t.Errorf("bd %s: err=%v, want a refusal naming the blocker\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout, stderr)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, held.ID); got.Assignee != "" || got.Status != types.StatusOpen {
+			t.Errorf("bd %s claimed externally blocked %s (status=%s assignee=%q)", strings.Join(args, " "), held.ID, got.Status, got.Assignee)
+		}
+	}
+	if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", free.ID, "--claim"); err != nil {
+		t.Fatalf("bd update %s --claim: %v\n%s\n%s", free.ID, err, stdout, stderr)
+	}
+	if got := bdProxiedShow(t, bd, p.dir, free.ID); got.Status != types.StatusInProgress || got.Assignee == "" {
+		t.Errorf("unblocked %s after --claim: status=%s assignee=%q, want claimed", free.ID, got.Status, got.Assignee)
+	}
+}

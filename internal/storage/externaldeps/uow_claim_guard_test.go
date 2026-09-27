@@ -3,6 +3,7 @@ package externaldeps
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -80,4 +81,69 @@ func TestUOWRawClaimIssueRefusesExternallyBlockedWork(t *testing.T) {
 		t.Fatalf("externally blocked %s was claimed by %q", blocked.ID, blocked.Assignee)
 	}
 	assertReads(t, "ClaimIssue", deps, 1)
+}
+
+// TestUpdateClaimRefusesExternallyBlockedWorkOnBothArms pins `bd update
+// --claim`'s path — Lifecycle.Update with Claim set — on both arms. On the
+// unit-of-work arm it is ApplyUpdate, whose undecorated body claims through its
+// OWN ClaimIssue and so never reached the ClaimIssue override; on the store arm
+// it is the policy lifecycle's Update, which used to guard only a close. A
+// blocked claim refuses and reaches nothing; an unblocked one goes through; a
+// ForceClosePolicy (what --force sets) does not bypass the claim guard.
+func TestUpdateClaimRefusesExternallyBlockedWorkOnBothArms(t *testing.T) {
+	locate := func(ProjectName) (string, bool) { return "", false }
+	edges := func(id string) map[string][]*types.Dependency {
+		return map[string][]*types.Dependency{id: {externalDep(id, "external:remote:payments", types.DepBlocks)}}
+	}
+
+	t.Run("unit-of-work arm", func(t *testing.T) {
+		blocked, ready := issue("be-blocked"), issue("be-ready")
+		issues := &fakeIssueUseCase{ready: []*types.Issue{blocked, ready}}
+		inner := &fakeUOW{issues: issues, deps: &fakeDependencyUseCase{external: edges(blocked.ID)}}
+		provider := WrapUOWProvider(&fakeUOWProvider{uw: inner}, locate, nil)
+		uw, err := provider.NewUOW(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := uw.IssueUseCase().ApplyUpdate(t.Context(), blocked.ID, domain.UpdateSpec{Claim: true}, "w"); !errors.Is(err, storage.ErrCloseBlocked) {
+			t.Fatalf("ApplyUpdate(Claim) of externally blocked %s: err = %v, want the external refusal", blocked.ID, err)
+		}
+		if slices.Contains(issues.closed, blocked.ID) {
+			t.Fatalf("the refused claim reached the undecorated ApplyUpdate: %v", issues.closed)
+		}
+		if _, err := uw.IssueUseCase().ApplyUpdate(t.Context(), ready.ID, domain.UpdateSpec{Claim: true}, "w"); err != nil {
+			t.Fatalf("ApplyUpdate(Claim) of unblocked %s: %v", ready.ID, err)
+		}
+		if _, err := uw.IssueUseCase().ClaimWisp(t.Context(), blocked.ID, "w"); !errors.Is(err, storage.ErrCloseBlocked) {
+			t.Fatalf("ClaimWisp of externally blocked %s: err = %v, want the external refusal", blocked.ID, err)
+		}
+	})
+
+	t.Run("store arm", func(t *testing.T) {
+		blocked, ready := issue("be-blocked"), issue("be-ready")
+		lifecycle := &fakeLifecycle{}
+		raw := &fakeStore{ready: []*types.Issue{blocked, ready}, lifecycle: lifecycle, deps: edges(blocked.ID)}
+		ops, err := testStore(raw, &fakeStore{}, false).IssueLifecycle()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, force := range []bool{false, true} {
+			if _, err := ops.Update(t.Context(), publicops.UpdateRequest{IssueID: blocked.ID, Actor: "w", Claim: true, ForceClosePolicy: force}); !errors.Is(err, storage.ErrCloseBlocked) {
+				t.Fatalf("Update(Claim, force=%v) of externally blocked %s: err = %v, want the external refusal", force, blocked.ID, err)
+			}
+		}
+		if lifecycle.updated != 0 {
+			t.Fatalf("a refused claim reached the inner lifecycle %d times", lifecycle.updated)
+		}
+		if _, err := ops.Update(t.Context(), publicops.UpdateRequest{IssueID: ready.ID, Actor: "w", Claim: true}); err != nil {
+			t.Fatalf("Update(Claim) of unblocked %s: %v", ready.ID, err)
+		}
+		if lifecycle.updated != 1 {
+			t.Fatalf("unblocked claim reached the inner lifecycle %d times, want 1", lifecycle.updated)
+		}
+	})
+}
+
+func (u *fakeIssueUseCase) ClaimWisp(ctx context.Context, id, actor string) (domain.ClaimResult, error) {
+	return u.ClaimIssue(ctx, id, actor)
 }
