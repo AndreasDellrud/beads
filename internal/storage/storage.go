@@ -938,6 +938,15 @@ type ExternalDependencyQueryStore interface {
 // copy would need dependency records a remote client cannot (and should not)
 // read.
 //
+// An implementer must answer true ONLY when the server it talks to has
+// advertised the behavior capability `policy.external_dependencies`
+// (httpapi.CapExternalDependencies, listed by GET /v0/beads/context), which a
+// server sets only when the ready, claim and close roles it answers from carry
+// the policy. Being a remote client is not enough: a server that does not
+// advertise the capability lists and claims past `external:` edges, so its
+// client must answer false — including when the capability list could not be
+// read — and let the client-side policy apply.
+//
 // The check is made on storage.UnwrapStore(store), so decorators such as
 // hooks and telemetry between the caller and the client do not hide it. A
 // store that does not implement this interface, or answers false, is treated
