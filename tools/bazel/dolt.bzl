@@ -12,14 +12,18 @@ one selected by //tools/bazel:dolt for the execution platform is fetched.
 
 DOLT_VERSION = "2.2.0"
 
-# sha256 of the upstream release tarballs dolt-<os>-<arch>.tar.gz. They match
-# the asset digests GitHub reports for the release
+# sha256 of the upstream release tarballs dolt-<os>-<arch>.tar.gz, keyed by
+# version so that bumping DOLT_VERSION without adding its digests fails instead
+# of reusing the previous release from the repository cache (which is keyed by
+# sha256 alone). They match the asset digests GitHub reports for the release
 # (`gh api repos/dolthub/dolt/releases/tags/v<version>`).
 DOLT_SHA256 = {
-    "darwin-amd64": "d40b57933e2a2c025a5a3c269eb87594b1aa71ead16c9902213d521529a19b02",
-    "darwin-arm64": "c6737dc2c5806e2eeef4839ad76c28167c861f878af3071df1242a6589d81267",
-    "linux-amd64": "1f7ad8c2622995789420a3fb0f2d16b4aa7430000a825dd91d5938f36480cbf6",
-    "linux-arm64": "a49a566d7c1ee9fdff553644855737f9d87047557c1ce1951aa7e7053277f4af",
+    "2.2.0": {
+        "darwin-amd64": "d40b57933e2a2c025a5a3c269eb87594b1aa71ead16c9902213d521529a19b02",
+        "darwin-arm64": "c6737dc2c5806e2eeef4839ad76c28167c861f878af3071df1242a6589d81267",
+        "linux-amd64": "1f7ad8c2622995789420a3fb0f2d16b4aa7430000a825dd91d5938f36480cbf6",
+        "linux-arm64": "a49a566d7c1ee9fdff553644855737f9d87047557c1ce1951aa7e7053277f4af",
+    },
 }
 
 _BUILD = """\
@@ -30,14 +34,20 @@ exports_files(["dolt"])
 
 def _dolt_release_impl(rctx):
     platform = rctx.attr.platform
-    if platform not in DOLT_SHA256:
+    digests = DOLT_SHA256.get(DOLT_VERSION)
+    if digests == None:
+        fail("DOLT_SHA256 has no digests for DOLT_VERSION {}".format(DOLT_VERSION))
+    if platform not in digests:
         fail("no pinned dolt {} release for platform {}".format(DOLT_VERSION, platform))
+    url = "https://github.com/dolthub/dolt/releases/download/v{v}/dolt-{p}.tar.gz".format(
+        v = DOLT_VERSION,
+        p = platform,
+    )
     rctx.download_and_extract(
-        url = "https://github.com/dolthub/dolt/releases/download/v{v}/dolt-{p}.tar.gz".format(
-            v = DOLT_VERSION,
-            p = platform,
-        ),
-        sha256 = DOLT_SHA256[platform],
+        url = url,
+        sha256 = digests[platform],
+        # Ties the repository-cache entry to this URL (and so this version).
+        canonical_id = url,
         stripPrefix = "dolt-{}/bin".format(platform),
     )
     rctx.file("BUILD.bazel", _BUILD)

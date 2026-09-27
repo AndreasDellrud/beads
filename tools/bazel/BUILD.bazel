@@ -1,5 +1,16 @@
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load(":dolt.bzl", "hermetic_bin")
+
+# Platforms with a pinned dolt release; elsewhere (e.g. windows) the hermetic
+# test wrapper is skipped by `bazel build //...` instead of failing analysis.
+_DOLT_PLATFORMS_ONLY = select({
+    ":darwin_amd64": [],
+    ":darwin_arm64": [],
+    ":linux_amd64": [],
+    ":linux_arm64": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
 
 # DOLT_VERSION is read as text by the dolt pin tests in //scripts.
 exports_files(
@@ -16,13 +27,25 @@ sh_binary(
     name = "test_env",
     srcs = ["test_env.sh"],
     data = [":hermetic_bin"],
+    target_compatible_with = _DOLT_PLATFORMS_ONLY,
     visibility = ["//visibility:public"],
+)
+
+# The dolt tests actually run (via test_env) reports DOLT_VERSION. Guards
+# against a stale download (or a mismatched digest table) the text-only pin
+# tests in //scripts cannot see.
+sh_test(
+    name = "dolt_version_test",
+    srcs = ["dolt_version_test.sh"],
+    data = ["dolt.bzl"],
+    target_compatible_with = _DOLT_PLATFORMS_ONLY,
 )
 
 # PATH directory holding the hermetic host tools, at
 # <runfiles>/_main/tools/bazel/hermetic_bin/.
 hermetic_bin(
     name = "hermetic_bin",
+    target_compatible_with = _DOLT_PLATFORMS_ONLY,
     tools = {":dolt": "dolt"},
 )
 
@@ -35,10 +58,17 @@ alias(
             ":darwin_arm64": "@dolt_darwin_arm64//:dolt",
             ":linux_amd64": "@dolt_linux_amd64//:dolt",
             ":linux_arm64": "@dolt_linux_arm64//:dolt",
+            "//conditions:default": ":no_pinned_dolt",
         },
-        no_match_error = "no pinned dolt release for this platform (tools/bazel/dolt.bzl)",
     ),
     visibility = ["//visibility:public"],
+)
+
+# Stand-in on platforms without a pinned dolt release: incompatible, so
+# `bazel build //...` skips its dependents there instead of failing analysis.
+filegroup(
+    name = "no_pinned_dolt",
+    target_compatible_with = ["@platforms//:incompatible"],
 )
 
 [
