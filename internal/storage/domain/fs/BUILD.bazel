@@ -13,6 +13,7 @@ go_library(
         "//internal/config",
         "//internal/configfile",
         "//internal/doltserver",
+        "//internal/gitignore",
         "//internal/storage/domain",
         "//internal/utils",
     ],

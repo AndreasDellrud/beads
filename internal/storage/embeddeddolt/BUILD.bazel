@@ -95,6 +95,7 @@ go_test(
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
+        "blocked_recheck_internal_test.go",
         "blocked_recompute_test.go",
         "blocking_annotator_contract_test.go",
         "bootstrapper_contract_test.go",
