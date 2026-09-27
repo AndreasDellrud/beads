@@ -174,6 +174,8 @@ type policyChainStub struct {
 
 	ready   []issueops.ReadyRequest
 	counted []issueops.ReadyRequest
+	listed  []issueops.ReadyListRequest
+	listing issueops.ReadyListing
 	claims  []issueops.ClaimNextRequest
 	batches []issueops.CloseBatchRequest
 	closes  []issueops.CloseRequest
@@ -217,6 +219,9 @@ func (s *policyChainStub) IssueReader() (issueops.Reader, error) { return policy
 func (s *policyChainStub) ReadyCounter() (issueops.ReadyCounter, error) {
 	return policyStubCounter{s}, nil
 }
+func (s *policyChainStub) ReadyLister() (issueops.ReadyLister, error) {
+	return policyStubLister{s}, nil
+}
 func (s *policyChainStub) ReadyClaimer() (issueops.ReadyClaimer, error) {
 	return policyStubClaimer{s}, nil
 }
@@ -246,6 +251,17 @@ type policyStubCounter struct{ *policyChainStub }
 func (c policyStubCounter) CountReady(_ context.Context, req issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
 	c.counted = append(c.counted, req)
 	return issueops.ReadyCountResult{}, nil
+}
+
+type policyStubLister struct{ *policyChainStub }
+
+func (l policyStubLister) ListReady(_ context.Context, req issueops.ReadyListRequest) (issueops.ReadyListing, error) {
+	l.listed = append(l.listed, req)
+	listing := l.listing
+	if listing.Items == nil {
+		listing.Items = []*types.IssueWithCounts{}
+	}
+	return listing, nil
 }
 
 type policyStubClaimer struct{ *policyChainStub }

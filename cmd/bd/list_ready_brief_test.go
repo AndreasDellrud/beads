@@ -404,7 +404,7 @@ func TestReadyBriefWithJSONIsAccepted(t *testing.T) {
 // make `bd ready --brief` hydrate every heavy column of the whole ready set to
 // fetch the total printed beside its page.
 func TestReadyRoleRequestCarriesBrief(t *testing.T) {
-	got := readyRoleRequest(readyInput{ReadyRequest: issueops.ReadyRequest{Brief: true}})
+	got := readyRoleRequest(readyInput{ReadyListRequest: issueops.ReadyListRequest{ReadyRequest: issueops.ReadyRequest{Brief: true}}})
 	if !got.Brief {
 		t.Error("readyRoleRequest dropped Brief, so the ready count would run unprojected")
 	}

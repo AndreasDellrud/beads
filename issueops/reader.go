@@ -608,11 +608,14 @@ type IssuePage struct {
 //     its own role, because it is a DERIVED annotation over ids a page already
 //     chose rather than a page.
 //
-//   - `bd ready` is NOT, on either route, and will not be until there are more
-//     roles to route it through. It consumes the FILTER itself for --claim,
-//     --gated, --explain and --mol. Two of its questions HAVE left the filter
-//     behind, each for the role that owns it: --claim is ReadyClaimer's, and
-//     the published total is ReadyCounter's, on both routes.
+//   - `bd ready` is NOT on THIS role, and that is a decision rather than a gap:
+//     its listing publishes a total beside the page, which is a different
+//     question from Ready's "did the limit hide anything", so it has a role of
+//     its own. The DIRECT listing is issueops.ReadyLister's — page and total
+//     in one read, over the request — and --claim is ReadyClaimer's on both
+//     routes. The PROXIED listing still runs the builder and the shared
+//     epilogue below, with ReadyCounter for its total, until it moves onto
+//     ReadyLister too. --gated, --explain and --mol answer other questions.
 //
 // WHAT `bd ready` DOES SHARE, stated exactly, because "not on the role" is not
 // the same as "unprotected":
@@ -620,24 +623,19 @@ type IssuePage struct {
 //   - CONSTRUCTION. Every route, and both implementations of this interface,
 //     build from these same request types through the same two builders in
 //     internal/workapi, which the builders' golden files pin.
-//   - EXECUTION, on the PROXIED route only. The direct route keeps an epilogue
-//     of its own and cannot give it up: it answers the strictly larger question
-//     "how many rows did the limit hide" and publishes the total in its
-//     pagination meta, where this role answers only "were any hidden".
-//     Collapsing them would change one surface's published output. That second
-//     question is not off-role, though — it is ReadyCounter's, which both
-//     routes now ask through their own accessor, over this same ReadyRequest;
-//     what stays outside this role is the PAGE's epilogue, not the count beside
-//     it.
+//   - EXECUTION, on the PROXIED route. The direct route's page and total are
+//     ReadyLister's, whose items and has-more are pinned equal to this role's
+//     Ready by its conformance contract (backend/conformance,
+//     RunReadyListerAgreesWithReadyAndCountReady).
 //
 // THE CLAIM, stated once and in full so it can be checked sentence by
 // sentence. SHARED: all three issue reads on the HTTP surface go through this
 // role, so does `bd show --json`'s detail view on both its routes, and so does
 // `bd list`'s page on both of its — in every mode but --watch and the
 // hierarchical --parent tree, which take the filter instead. `bd ready` is not
-// on it and shares instead the request types above, the two builders in
-// internal/workapi that their golden files pin, and workapi.FinishPage on its
-// proxied route only. ENFORCED,
+// on it: its direct listing is on ReadyLister, and its proxied listing shares
+// the request types above, the two builders in internal/workapi that their
+// golden files pin, and workapi.FinishPage. ENFORCED,
 // and by what: depguard (httpapi-transport-boundary) denies internal/workapi
 // from every non-test file of internal/httpapi, so no builder is callable
 // there, and a forbidigo rule denies naming types.IssueFilter or
@@ -651,16 +649,15 @@ type IssuePage struct {
 // value, so the property is "no filter is written there", not "every filter
 // there came from a builder"; test files are exempt from both rules, because
 // the oracles hold filters in order to inspect them; `bd ready`'s files are
-// among the 59, since its listing and --claim are handed the filter itself and
-// the blocked-issue views in those files name one directly, so it is guarded by
-// the builder and the golden files and not by the linter;
+// among the 59, since its proxied listing is still handed the filter and the
+// blocked-issue views and --explain in those files name one directly, so that
+// much is guarded by the builder and the golden files and not by the linter;
 // cmd/bd/list_show_filter_modes.go is among them too and STAYS there — the
 // count did not drop with this flip, because that file is where `bd list`'s
 // two filter-consuming modes and `bd show --current` live and all three still
 // need to name the type;
 // GET /healthz and GET /v0/beads/context are not issue queries and are on no
-// role; `bd ready`'s direct route and `bd list`'s hierarchical tree run
-// epilogues of their own; and none of this is a merge gate — the rules run in
+// role; `bd list`'s hierarchical tree runs an epilogue of its own; and none of this is a merge gate — the rules run in
 // `make ci-pr-lint` on every pull request and aggregate into the ci-gate job,
 // but main carries no branch protection beyond deletion and non-fast-forward,
 // so no check is GitHub-required and a red gate binds by convention.

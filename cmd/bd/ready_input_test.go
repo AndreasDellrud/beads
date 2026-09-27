@@ -496,14 +496,15 @@ func TestGatherReadyInputFlatAliasesPlain(t *testing.T) {
 	}
 }
 
-// TestGatherReadyInputKeepsDirectoryLabelVerbatim pins GH#541's label against
-// the collapse into workapi. The configured label is not user input: `bd ready`
-// has always put it on the filter exactly as configured, so it must not be
-// routed through issueops.ReadyRequest, whose label sets BuildReadyFilter
-// normalizes.
-// The label below is one NormalizeLabels would visibly change, which is what
-// makes this a test and not a tautology.
-func TestGatherReadyInputKeepsDirectoryLabelVerbatim(t *testing.T) {
+// TestGatherReadyInputNormalizesTheDirectoryLabel pins where GH#541's label
+// lives now that the listing is on the ReadyLister role: ON THE REQUEST, where
+// it is normalized like every other label, so the listing, its total and a
+// --claim beside it scope to the same set. The listing used to put the
+// configured value on its filter verbatim; the label below is one
+// NormalizeLabels visibly changes, which is what makes this a test of that
+// decision rather than a tautology. The proxied filter is built from the same
+// request, so it carries the same normalized value.
+func TestGatherReadyInputNormalizesTheDirectoryLabel(t *testing.T) {
 	const configured = "  scope:web  "
 	configureDirectoryLabel(t, configured)
 
@@ -511,9 +512,26 @@ func TestGatherReadyInputKeepsDirectoryLabelVerbatim(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("gatherReadyInput: %v", got.err)
 	}
-	if want := []string{configured}; !slices.Equal(got.in.filter.LabelsAny, want) {
-		t.Errorf("filter.LabelsAny = %q, want %q (the configured value, unnormalized)", got.in.filter.LabelsAny, want)
+	want := []string{"scope:web"}
+	if !slices.Equal(got.in.filter.LabelsAny, want) {
+		t.Errorf("filter.LabelsAny = %q, want %q (the configured value, normalized)", got.in.filter.LabelsAny, want)
 	}
+	if req := readyRoleRequest(got.in); !slices.Equal(workapiNormalized(t, req), want) {
+		t.Errorf("role request LabelsAny normalizes to %q, want %q", workapiNormalized(t, req), want)
+	}
+	if !slices.Equal(got.in.LabelsAny, []string{configured}) {
+		t.Errorf("request LabelsAny = %q, want the configured %q (normalization happens inside the role)", got.in.LabelsAny, []string{configured})
+	}
+}
+
+// workapiNormalized is the label set the role will actually match for req.
+func workapiNormalized(t *testing.T, req issueops.ReadyRequest) []string {
+	t.Helper()
+	filter, err := workapi.BuildReadyFilter(req)
+	if err != nil {
+		t.Fatalf("BuildReadyFilter: %v", err)
+	}
+	return filter.LabelsAny
 }
 
 // TestGatherReadyInputDirectoryLabelDefaultsOnlyWhenNoLabelsGiven pins the two

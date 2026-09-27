@@ -115,7 +115,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if err != nil {
 			return err
 		}
-		filter := in.filter
 
 		ctx := rootCtx
 
@@ -137,9 +136,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			// The claim is on the ReadyClaimer role, through the store's own
 			// accessor, so selection, the compare-and-set and the hydration
-			// that feeds --json all share one transaction. The listing below
-			// is not on a role and still builds the filter, for the reasons
-			// issueops.Reader's doc comment gives.
+			// that feeds --json all share one transaction.
 			claimer, err := activeStore.ReadyClaimer()
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
@@ -173,31 +170,32 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return nil
 		}
 
+		// The listing is the ReadyLister role's, through the store's own
+		// accessor, for every output mode: the page and the size of the whole
+		// ready set come back from ONE read (the total rides the page's own ID
+		// query), so "Showing N of M" costs no second counting pass, and the
+		// decorators — the external-dependency policy, telemetry, a remote
+		// store that forwards the request — each get their layer. The request
+		// is the command line verbatim (readyInput.ReadyListRequest); this
+		// function builds no filter.
+		listing, err := listReady(ctx, activeStore, in)
+		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
+			return HandleErrorRespectJSON("%v", err)
+		}
+		// HasMore is "the limit hid rows", read off the total in the same
+		// snapshot, so the published total can never be smaller than the page
+		// beside it.
+		truncated := listing.HasMore
+		totalReady := len(listing.Items)
+		if truncated {
+			totalReady = int(listing.Total)
+		}
+
 		if jsonOutput {
-			// The page and the size of the whole ready set come back from ONE
-			// read transaction: the total rides the page's own ID query, so a
-			// capped listing no longer pays for a second counting pass (and a
-			// second defer-wake sweep) just to print "Showing N of M". Against
-			// a remote SQL server each of that pass's statements was a
-			// sequential round trip. The total is the same number the
-			// ReadyCounter role answers (storage.DoltStorage documents the
-			// identity), taken over the listing's own filter.
-			results, total, err := activeStore.GetReadyWorkWithCountsAndTotal(ctx, filter)
-			if err != nil {
-				if capErr := handleMaxRowsError(err); capErr != nil {
-					return capErr
-				}
-				return HandleErrorRespectJSON("%v", err)
-			}
-			totalReady := len(results)
-			truncated := false
-			if filter.Limit > 0 && len(results) == filter.Limit && total > len(results) {
-				totalReady = total
-				truncated = true
-			}
-			if results == nil {
-				results = []*types.IssueWithCounts{}
-			}
+			results := listing.Items
 			var pag *PaginationMeta
 			if truncated {
 				pag = &PaginationMeta{
@@ -215,25 +213,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return nil
 		}
 
-		issues, err := activeStore.GetReadyWork(ctx, filter)
-		if err != nil {
-			if capErr := handleMaxRowsError(err); capErr != nil {
-				return capErr
-			}
-			return HandleErrorRespectJSON("%v", err)
-		}
-
-		totalReady := len(issues)
-		truncated := false
-		if filter.Limit > 0 && len(issues) == filter.Limit {
-			// The same question the --json branch answers in-band, asked here
-			// of the ReadyCounter role, whose answer is the same identity, so
-			// the "Showing X of N" a human reads and the total a script parses
-			// are one number.
-			if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(issues) {
-				totalReady = n
-				truncated = true
-			}
+		issues := make([]*types.Issue, 0, len(listing.Items))
+		for _, item := range listing.Items {
+			issues = append(issues, item.Issue)
 		}
 		maybeShowUpgradeNotification()
 
@@ -402,29 +384,14 @@ var blockedCmd = &cobra.Command{
 	},
 }
 
-// readyTotal sizes the whole ready set for the request `bd ready` just listed
-// a page of, through the store's own ReadyCounter accessor.
-//
-// THE TEXT OUTPUT CALLS IT, and only when the page came back full, which is
-// the one situation where the answer can differ from what is already on
-// screen. The --json listing does not: it takes its total in-band from
-// GetReadyWorkWithCountsAndTotal, in the page's own transaction.
-//
-// The role has no --max-rows field to honor and needs none: the cap bounds a
-// page this machine materializes, and a count materializes no rows.
-//
-// A failed count is not a failed command — the page is already correct; all
-// that is lost is the "of N" beside it.
-func readyTotal(ctx context.Context, activeStore storage.DoltStorage, in readyInput) (int, error) {
-	counter, err := activeStore.ReadyCounter()
+// listReady answers `bd ready`'s listing through the store's own ReadyLister
+// accessor with the request the command line built, unchanged.
+func listReady(ctx context.Context, activeStore storage.DoltStorage, in readyInput) (issueops.ReadyListing, error) {
+	lister, err := activeStore.ReadyLister()
 	if err != nil {
-		return 0, err
+		return issueops.ReadyListing{}, err
 	}
-	result, err := counter.CountReady(ctx, readyRoleRequest(in))
-	if err != nil {
-		return 0, err
-	}
-	return int(result.Total), nil
+	return lister.ListReady(ctx, in.ReadyListRequest)
 }
 
 // buildParentEpicMap builds a map from child issue ID to parent epic title.

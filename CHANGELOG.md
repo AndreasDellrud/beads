@@ -348,6 +348,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   purge that used to delete a closed molecule root under a live step now
   leaves it. See the `--wisps-plane` entry under Added.
 
+- **`bd ready`'s direct listing is one read in every output mode, and its
+  directory-label scope is normalized.** The listing now goes through the
+  `issueops.ReadyLister` role, which returns the page and the size of the
+  ready set from the same statements. The text rendering used to list with a
+  separate query and, when the page was full, run a second counting
+  transaction for "Showing X of N"; it now issues 3-6 statements where it
+  issued 7-18 (measured on the embedded engine), and its output is
+  byte-for-byte unchanged. One visible difference: a `directory.labels` value
+  with surrounding whitespace is now trimmed before matching on the listing,
+  as `bd ready --claim` and the published total already did, so all three
+  scope to the same set; a value that is only whitespace applies no scope.
+
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
   command prints gains a `reason` field next to the existing `code`, `error`
   and `mutates`: `design` for a refusal that is expected to stay (shared

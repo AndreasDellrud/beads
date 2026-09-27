@@ -189,6 +189,7 @@ go_test(
         "ready_claimer_contract_test.go",
         "ready_counter_contract_test.go",
         "ready_lister_contract_test.go",
+        "ready_text_route_budget_test.go",
         "ready_total_test.go",
         "ready_work_missing_table_test.go",
         "reject_stale_upsert_test.go",
