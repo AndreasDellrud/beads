@@ -8,7 +8,8 @@
 //
 // Repository-root resolution order:
 //
-//  1. BEADS_TEST_REPO_ROOT, an explicit override (debug escape hatch)
+//  1. BEADS_TEST_REPO_ROOT, an explicit override (debug escape hatch); it is
+//     honored only when it names a directory holding go.mod
 //  2. under Bazel, the runfiles workspace root ($TEST_SRCDIR/$TEST_WORKSPACE);
 //     it holds exactly the files the test declares in its BUILD `data`
 //  3. a walk up from the working directory to go.mod (plain `go test`)
@@ -18,7 +19,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	goruntime "runtime"
 	"strings"
 	"testing"
 )
@@ -65,8 +65,19 @@ func workspaceRoot() string {
 	return root
 }
 
-// OverrideRoot returns the repository root when BEADS_TEST_REPO_ROOT is set
-// or the test runs under Bazel, and "" otherwise. It is the drop-in condition
+// envRoot returns BEADS_TEST_REPO_ROOT and whether it is usable: set and
+// holding a go.mod, so a stale or mistyped value never redirects a scan.
+func envRoot() (string, bool) {
+	root := os.Getenv(RepoRootEnv)
+	if root == "" {
+		return "", false
+	}
+	_, err := os.Stat(filepath.Join(root, "go.mod"))
+	return root, err == nil
+}
+
+// OverrideRoot returns the repository root when BEADS_TEST_REPO_ROOT names a
+// directory holding go.mod or the test runs under Bazel, and "" otherwise. It is the drop-in condition
 // for existing path helpers:
 //
 //	if root := bazeltest.OverrideRoot(); root != "" {
@@ -76,7 +87,7 @@ func workspaceRoot() string {
 //
 // Under Bazel the returned tree holds only the test's declared data.
 func OverrideRoot() string {
-	if root := os.Getenv(RepoRootEnv); root != "" {
+	if root, ok := envRoot(); ok {
 		return root
 	}
 	return workspaceRoot()
@@ -86,11 +97,10 @@ func OverrideRoot() string {
 // resolution order. It fails the test when no root can be found.
 func RepoRoot(t testing.TB) string {
 	t.Helper()
-	if root := os.Getenv(RepoRootEnv); root != "" {
-		if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
-			t.Fatalf("%s=%s is not a directory", RepoRootEnv, root)
-		}
+	if root, ok := envRoot(); ok {
 		return root
+	} else if root != "" {
+		t.Fatalf("%s=%s has no go.mod", RepoRootEnv, root)
 	}
 	if root := workspaceRoot(); root != "" {
 		return root
@@ -134,42 +144,6 @@ func Runfile(path string) (string, error) {
 		return "", fmt.Errorf("runfile %q: %w", path, err)
 	}
 	return full, nil
-}
-
-// GOROOT returns a Go SDK root for tests that type-check source under Bazel,
-// or "" outside Bazel (leaving the ambient toolchain in charge). It prefers
-// the SDK compiled into the test binary (rules_go pins it to the hermetic SDK
-// in the output tree) and falls back to a runfiles directory named *go_sdk*,
-// present when the test declares @go_sdk//:srcs in its data (needed under
-// remote execution, where the output-tree path does not exist).
-func GOROOT() string {
-	if !IsBazel() {
-		return ""
-	}
-	//nolint:staticcheck // SA1019: deliberately the compiled-in GOROOT; validated below.
-	if gr := goruntime.GOROOT(); gr != "" && hasGoSources(gr) {
-		return gr
-	}
-	rf := runfilesDir()
-	entries, err := os.ReadDir(rf)
-	if err != nil {
-		return ""
-	}
-	for _, e := range entries {
-		if !strings.Contains(e.Name(), "go_sdk") {
-			continue
-		}
-		candidate := filepath.Join(rf, e.Name())
-		if hasGoSources(candidate) {
-			return candidate
-		}
-	}
-	return ""
-}
-
-func hasGoSources(root string) bool {
-	_, err := os.Stat(filepath.Join(root, "src", "time", "time.go"))
-	return err == nil
 }
 
 // shardEnvVars are the Bazel sharding protocol variables. A helper process

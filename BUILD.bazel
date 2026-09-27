@@ -27,6 +27,11 @@ exports_files(
 
 # //test/docsync: the Mintlify site, engdocs, root markdown, and the files
 # outside those trees that their local links point at.
+#
+# The out-of-tree link targets are hand-listed: a new docs/engdocs link to a
+# file outside these globs passes `go test` but fails under Bazel until the
+# target is added here. The globs stop at package boundaries, so no BUILD file
+# may live under docs/ or engdocs/ (enforced by scripts/bazel_policy_test.go).
 filegroup(
     name = "docsync_files",
     srcs = glob([

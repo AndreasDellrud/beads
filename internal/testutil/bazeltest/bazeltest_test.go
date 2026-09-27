@@ -34,12 +34,24 @@ func TestRepoRootHoldsDeclaredData(t *testing.T) {
 
 func TestRepoRootHonorsOverride(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/m\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv(RepoRootEnv, dir)
 	if got := RepoRoot(t); got != dir {
 		t.Fatalf("RepoRoot() = %q, want override %q", got, dir)
 	}
 	if got := OverrideRoot(); got != dir {
 		t.Fatalf("OverrideRoot() = %q, want override %q", got, dir)
+	}
+}
+
+func TestOverrideRootIgnoresRootWithoutGoMod(t *testing.T) {
+	t.Setenv(RepoRootEnv, "")
+	want := OverrideRoot()
+	t.Setenv(RepoRootEnv, t.TempDir())
+	if got := OverrideRoot(); got != want {
+		t.Fatalf("OverrideRoot() = %q with a go.mod-less override, want %q (override ignored)", got, want)
 	}
 }
 
@@ -88,19 +100,6 @@ func TestRunfileResolvesOnlyUnderBazel(t *testing.T) {
 	}
 	if _, err := Runfile(ws + "/does/not/exist"); err == nil {
 		t.Fatal("Runfile() of a missing path succeeded")
-	}
-}
-
-func TestGOROOT(t *testing.T) {
-	gr := GOROOT()
-	if !IsBazel() {
-		if gr != "" {
-			t.Fatalf("GOROOT() = %q outside bazel, want empty", gr)
-		}
-		return
-	}
-	if gr != "" && !hasGoSources(gr) {
-		t.Fatalf("GOROOT() = %q has no Go sources", gr)
 	}
 }
 
