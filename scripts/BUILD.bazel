@@ -3,6 +3,8 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "scripts_test",
     srcs = [
+        "bazel_policy_test.go",
+        "check_build_tags_test.go",
         "check_testing_short_test.go",
         "ci_capability_selector_test.go",
         "ci_workflow_apt_get_timeout_test.go",
@@ -14,6 +16,7 @@ go_test(
         "release_script_test.go",
         "test_script_test.go",
     ],
+    data = ["//:bazel_policy_files"],
     deps = [
         "//internal/formula",
         "@in_gopkg_yaml_v3//:yaml_v3",

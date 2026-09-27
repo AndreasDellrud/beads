@@ -10,6 +10,21 @@ exports_files([
     "go.sum",
 ])
 
+# Inputs of the Bazel policy tests in //scripts (bazel_policy_test.go), so they
+# run under `bazel test` as well as `go test`.
+filegroup(
+    name = "bazel_policy_files",
+    srcs = [
+        ".bazelrc",
+        ".bazelversion",
+        ".gitignore",
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "go.mod",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
 go_library(
     name = "beads",
     srcs = [
