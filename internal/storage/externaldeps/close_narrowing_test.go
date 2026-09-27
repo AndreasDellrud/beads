@@ -180,3 +180,99 @@ func TestUOWCloseResolvesOnlyTheClosedIssuesOwnRefs(t *testing.T) {
 		t.Errorf("closes that reached the use case = %v, want be-free and never be-held", issues.closed)
 	}
 }
+
+// TestApplyBatchResolvesOnlyTheClosingItemsOwnRefs pins both arms' apply-batch
+// guard to the closing items' OWN edges: one read naming exactly the existing
+// closing targets (deduplicated, never one read per item), no read of the
+// workspace's external edges, and so no warning about be-other's unavailable
+// project and no foreign open when nothing the batch closes references one.
+// The closing items' own blockers, and one an earlier dep_add item adds, are
+// still refused.
+func TestApplyBatchResolvesOnlyTheClosingItemsOwnRefs(t *testing.T) {
+	addHeld := publicops.ApplyItem{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+		Source: publicops.Ref{ID: "be-free"}, Target: publicops.Ref{ID: "external:remote:payments"}, Type: types.DepBlocks,
+	}}
+	cases := []struct {
+		name      string
+		req       publicops.ApplyBatchRequest
+		refused   int // index of the refused item, or -1
+		wantOpens int
+	}{
+		{"unrelated close", applyReq(closeItem("be-free"), closingUpdate("be-free")), -1, 0},
+		{"own blocker", applyReq(closeItem("be-free"), closingUpdate("be-held"), closeItem("be-free")), 1, 1},
+		{"blocker added earlier", applyReq(addHeld, closeItem("be-free")), 1, 1},
+	}
+	wantIDs := [][]string{{"be-free"}, {"be-free", "be-held"}, {"be-free"}}
+
+	t.Run("store", func(t *testing.T) {
+		w := newCloseNarrowingWorld()
+		raw := &fakeStore{ready: []*types.Issue{issue("be-free"), issue("be-other"), issue("be-held")}, deps: w.edges}
+		store := New(&applierStore{fakeStore: raw, applier: &recordingApplier{}}, w.locate, w.open)
+		w.watch(store.Policy)
+		applier, err := store.BatchApplier()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, tc := range cases {
+			raw.ownIDs = nil
+			_, err := applier.ApplyBatch(t.Context(), tc.req)
+			if tc.refused < 0 && err != nil {
+				t.Errorf("%s: %v", tc.name, err)
+			} else if tc.refused >= 0 {
+				blockedItemError(t, tc.name, err, tc.refused)
+			}
+			w.check(t, tc.name, tc.wantOpens)
+			if !slices.EqualFunc(raw.ownIDs, [][]string{wantIDs[i]}, slices.Equal) {
+				t.Errorf("%s: own-edge reads %v, want one naming %v", tc.name, raw.ownIDs, wantIDs[i])
+			}
+		}
+		if raw.edgeReads != 0 {
+			t.Errorf("apply-batch read the workspace's external edges %d times, want 0", raw.edgeReads)
+		}
+	})
+
+	t.Run("unit of work", func(t *testing.T) {
+		w := newCloseNarrowingWorld()
+		issues := &fakeIssueUseCase{ready: []*types.Issue{issue("be-free"), issue("be-other"), issue("be-held")}}
+		deps := &countingDependencyUseCase{fakeDependencyUseCase: &fakeDependencyUseCase{external: w.edges}}
+		counting := &countingUOWProvider{openCountingProvider: &openCountingProvider{uw: &fakeUOW{issues: issues, deps: deps}}}
+		provider := WrapUOWProvider(counting, w.locate, w.open)
+		w.watch(provider.(*uowProvider).policy)
+		applier, err := provider.(uow.BatchApplierSource).BatchApplier()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The fake unit of work cannot add an edge, so the dep_add case runs on
+		// the store arm only; the request inspection that finds such an edge
+		// (batchAddedExternalRefs) is shared by both arms.
+		for i, tc := range cases[:2] {
+			// Only reads made BEFORE the batch's own unit of work (the last
+			// one opened) are the policy's.
+			counting.opened = 0
+			var policyReads [][]string
+			var readIn []int
+			deps.onOwnRead = func(ids []string) {
+				readIn = append(readIn, counting.opened)
+				policyReads = append(policyReads, slices.Clone(ids))
+			}
+			_, err := applier.ApplyBatch(t.Context(), tc.req)
+			if tc.refused < 0 && err != nil {
+				t.Errorf("%s: %v", tc.name, err)
+			} else if tc.refused >= 0 {
+				blockedItemError(t, tc.name, err, tc.refused)
+			}
+			w.check(t, tc.name, tc.wantOpens)
+			var pre [][]string
+			for j, in := range readIn {
+				if in < counting.opened {
+					pre = append(pre, policyReads[j])
+				}
+			}
+			if !slices.EqualFunc(pre, [][]string{wantIDs[i]}, slices.Equal) {
+				t.Errorf("%s: policy own-edge reads %v, want one naming %v", tc.name, pre, wantIDs[i])
+			}
+		}
+		deps.onOwnRead = nil
+		assertReads(t, "apply-batch", deps, 0)
+	})
+}

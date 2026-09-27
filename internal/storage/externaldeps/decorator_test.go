@@ -34,6 +34,8 @@ type fakeStore struct {
 	// ownReads counts every read of NAMED issues' edges
 	// (GetDependencyRecordsForIssues), which a guard on those issues makes.
 	ownReads int
+	// ownIDs records the ids of every such read, in order.
+	ownIDs [][]string
 }
 
 func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
@@ -134,6 +136,7 @@ func (f *fakeStore) GetExternalBlockingDependencyRecords(_ context.Context) (map
 
 func (f *fakeStore) GetDependencyRecordsForIssues(_ context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
 	f.ownReads++
+	f.ownIDs = append(f.ownIDs, slices.Clone(issueIDs))
 	result := make(map[string][]*types.Dependency)
 	for _, id := range issueIDs {
 		result[id] = f.deps[id]

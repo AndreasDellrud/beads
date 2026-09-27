@@ -60,7 +60,8 @@ func blockedItemError(t *testing.T, op string, err error, index int) {
 // is reached; a satisfied blocker, a force, or an unrelated item passes
 // unchanged; an already-closed target is forwarded pinned to its closed state
 // (ExpectedStatus / ExpectedVersion) on a copy of the request; an external
-// edge an earlier dep_add item adds is seen. At most one edge read per call.
+// edge an earlier dep_add item adds is seen. At most one read per call, of the
+// closing targets' own edges, and never the workspace's.
 func TestStoreArmApplyBatchGuardsClosingItems(t *testing.T) {
 	blocked, provided, free, done := issue("be-blocked"), issue("be-provided"), issue("be-free"), issue("be-done")
 	done.Status, done.RowVersion = types.StatusClosed, 7
@@ -86,10 +87,13 @@ func TestStoreArmApplyBatchGuardsClosingItems(t *testing.T) {
 	ctx := t.Context()
 	run := func(op string, req publicops.ApplyBatchRequest) error {
 		t.Helper()
-		raw.edgeReads = 0
+		raw.edgeReads, raw.ownReads = 0, 0
 		_, err := applier.ApplyBatch(ctx, req)
-		if raw.edgeReads > 1 {
-			t.Errorf("%s: %d edge reads, want at most 1", op, raw.edgeReads)
+		if raw.edgeReads != 0 {
+			t.Errorf("%s: %d workspace edge reads, want 0", op, raw.edgeReads)
+		}
+		if raw.ownReads > 1 {
+			t.Errorf("%s: %d own-edge reads, want at most 1", op, raw.ownReads)
 		}
 		return err
 	}
@@ -224,9 +228,10 @@ func applyItemPtrs(req publicops.ApplyBatchRequest) []any {
 
 // TestUOWArmApplyBatchGuardsClosingItemsOutsideTheWriteTransaction pins the
 // unit-of-work arm: the same refusals, the re-close exemption decided inside
-// the batch's own transaction, one external-edge read per call (the batch runs
-// over the undecorated provider, so no use-case override re-reads them per
-// item), and no foreign-store open while a unit of work is open.
+// the batch's own transaction, one read of the closing targets' own edges per
+// call and none of the workspace's (the batch runs over the undecorated
+// provider, so no use-case override re-reads them per item), and no
+// foreign-store open while a unit of work is open.
 func TestUOWArmApplyBatchGuardsClosingItemsOutsideTheWriteTransaction(t *testing.T) {
 	blocked, provided, free, done := issue("be-blocked"), issue("be-provided"), issue("be-free"), issue("be-done")
 	done.Status = types.StatusClosed
@@ -257,10 +262,27 @@ func TestUOWArmApplyBatchGuardsClosingItemsOutsideTheWriteTransaction(t *testing
 	run := func(op string, req publicops.ApplyBatchRequest, wantReads, wantUOWs int) error {
 		t.Helper()
 		issues.closed, counting.opened = nil, 0
+		// The batch's own unit of work is the LAST one opened; an own-edge read
+		// in an earlier one is the policy's pre-read (reads inside the batch are
+		// the applier's hydration, not the policy's).
+		var readIn []int
+		deps.onOwnRead = func([]string) { readIn = append(readIn, counting.opened) }
+		defer func() { deps.onOwnRead = nil }()
 		_, err := applier.ApplyBatch(ctx, req)
-		// One edge read per call, in its own read-only unit of work before the
-		// batch; none when nothing closes unforced.
-		assertReads(t, op, deps, wantReads)
+		// One read of the closing targets' own edges per call, in its own
+		// read-only unit of work before the batch; none when nothing closes
+		// unforced or the only closing target is one the request creates. The
+		// workspace's external edges are never read.
+		assertReads(t, op, deps, 0)
+		preReads := 0
+		for _, in := range readIn {
+			if in < counting.opened {
+				preReads++
+			}
+		}
+		if preReads != wantReads {
+			t.Errorf("%s: policy own-edge reads = %d, want %d", op, preReads, wantReads)
+		}
 		if counting.opened != wantUOWs {
 			t.Errorf("%s: units of work opened = %d, want %d", op, counting.opened, wantUOWs)
 		}
@@ -281,7 +303,7 @@ func TestUOWArmApplyBatchGuardsClosingItemsOutsideTheWriteTransaction(t *testing
 			Source: publicops.Ref{Key: "k"}, Target: publicops.Ref{ID: "external:remote:missing"}, Type: types.DepBlocks,
 		}},
 		publicops.ApplyItem{Kind: publicops.ItemClose, Close: &publicops.CloseItem{Target: publicops.Ref{Key: "k"}}})
-	blockedItemError(t, "row the request creates", run("row the request creates", created, 1, 1), 2)
+	blockedItemError(t, "row the request creates", run("row the request creates", created, 0, 0), 2)
 
 	forcedClose := closeItem(blocked.ID)
 	forcedClose.Close.Force = true

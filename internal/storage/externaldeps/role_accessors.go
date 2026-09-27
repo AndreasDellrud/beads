@@ -120,7 +120,7 @@ func (s *Store) BatchApplier() (issueops.BatchApplier, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &policyBatchApplier{inner: inner, policy: s.Policy, edges: s.edgeSource(), current: s.inner.GetIssue}, nil
+	return &policyBatchApplier{inner: inner, policy: s.Policy, own: s.inner.GetDependencyRecordsForIssues, current: s.inner.GetIssue}, nil
 }
 
 // settleFlaggedClose answers a batch item an unsatisfied external blocker holds

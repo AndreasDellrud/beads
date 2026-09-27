@@ -133,10 +133,18 @@ type countingDependencyUseCase struct {
 	reads int
 	// ownReads counts reads of named issues' edges (GetIssueDependencyRecords).
 	ownReads int
+	// ownIDs records the ids of every such read, in order.
+	ownIDs [][]string
+	// onOwnRead, when set, sees every such read's ids.
+	onOwnRead func(ids []string)
 }
 
 func (c *countingDependencyUseCase) GetIssueDependencyRecords(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
 	c.ownReads++
+	c.ownIDs = append(c.ownIDs, slices.Clone(ids))
+	if c.onOwnRead != nil {
+		c.onOwnRead(ids)
+	}
 	return c.fakeDependencyUseCase.GetIssueDependencyRecords(ctx, ids)
 }
 

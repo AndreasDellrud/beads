@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -23,10 +24,12 @@ import (
 // `bd update --status in_progress` is, which no route treats as a claim.
 //
 // THE POLICY RUNS ONCE PER CALL, before the write transaction: one read of the
-// workspace's external edges, and the foreign projects resolved for the closing
-// items' refs only — including refs an EARLIER dep_add item of the same request
-// gives the target, since the batch can add an `external:` blocker and close
-// its source in one request. No foreign store is opened inside the batch's
+// closing targets' OWN edges (never the whole workspace's, so an unrelated
+// issue's `external:` edge costs the batch neither a foreign open nor a
+// warning), and the foreign projects resolved for the closing items' refs
+// only — including refs an EARLIER dep_add item of the same request gives the
+// target, since the batch can add an `external:` blocker and close its source
+// in one request. No foreign store is opened inside the batch's
 // transaction, and the batch runs on an applier that applies no policy of its
 // own, so nothing is re-read or re-resolved per item beneath it.
 //
@@ -57,7 +60,8 @@ import (
 type policyBatchApplier struct {
 	inner  issueops.BatchApplier
 	policy *Policy
-	edges  EdgeSource
+	// own reads the closing targets' own edges, in one call for the batch.
+	own OwnEdgeSource
 	// guarded (unit-of-work arm) builds the applier for one call whose
 	// transaction refuses each flagged id unless it is already closed there.
 	guarded func(flagged map[string][]string) (issueops.BatchApplier, error)
@@ -88,9 +92,9 @@ func (a *policyBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyB
 		// Nothing closes unforced: nothing below would read the edges.
 		return a.inner.ApplyBatch(ctx, req)
 	}
-	edges, err := a.edges(ctx)
+	edges, err := a.ownEdges(ctx, closing)
 	if err != nil {
-		return issueops.ApplyBatchResult{}, fmt.Errorf("external dependencies: list blocking records: %w", err)
+		return issueops.ApplyBatchResult{}, err
 	}
 	var refs []reference
 	for i := range closing {
@@ -151,6 +155,26 @@ func (a *policyBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyB
 		}
 	}
 	return inner.ApplyBatch(ctx, forwarded)
+}
+
+// ownEdges reads the existing closing targets' own edges in ONE call. A
+// target the request creates has no stored edges to read; its refs come only
+// from the request's dep_add items.
+func (a *policyBatchApplier) ownEdges(ctx context.Context, closing []batchClosingItem) (map[string][]*types.Dependency, error) {
+	var ids []string
+	for _, item := range closing {
+		if !item.created && item.target.ID != "" && !slices.Contains(ids, item.target.ID) {
+			ids = append(ids, item.target.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	edges, err := a.own(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("external dependencies: list blocking records: %w", err)
+	}
+	return edges, nil
 }
 
 // pinReClose is the store arm's answer for one flagged item: refused unless a

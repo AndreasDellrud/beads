@@ -443,8 +443,9 @@ func (p *uowProvider) DependencyEditor() (publicops.DependencyEditor, error) {
 }
 
 // BatchApplier guards the apply-batch items that close with the SAME wrapper
-// as the store arm (policyBatchApplier): one edge read and the closing items'
-// foreign refs resolved before the batch's transaction, and the batch itself
+// as the store arm (policyBatchApplier): one read of the closing items' OWN
+// edges (GetIssueDependencyRecords, both planes) and their foreign refs
+// resolved before the batch's transaction, and the batch itself
 // run over the UNDECORATED provider — it used to be built over this wrapper,
 // whose use-case overrides re-read the edges and opened every referenced
 // foreign project inside the write transaction, once per closing item. A
@@ -458,7 +459,7 @@ func (p *uowProvider) BatchApplier() (publicops.BatchApplier, error) {
 	return &policyBatchApplier{
 		inner:  inner,
 		policy: p.policy,
-		edges:  p.externalEdges,
+		own:    p.ownEdges,
 		guarded: func(flagged map[string][]string) (publicops.BatchApplier, error) {
 			return uow.NewBatchApplier(&batchCloseGuard{UnitOfWorkProvider: p.UnitOfWorkProvider, flagged: flagged})
 		},
