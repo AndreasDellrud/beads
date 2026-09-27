@@ -936,6 +936,7 @@ go_test(
         "readonly_policy_test.go",
         "readonly_test.go",
         "ready_embedded_test.go",
+        "ready_external_equivalence_test.go",
         "ready_golden_embedded_test.go",
         "ready_golden_proxied_test.go",
         "ready_input_test.go",

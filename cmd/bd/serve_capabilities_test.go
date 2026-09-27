@@ -42,9 +42,9 @@ func serveRolesTestConfig(roles serveRoles) httpapi.Config {
 	}
 }
 
-// serveContextCapabilities binds cfg on an ephemeral loopback port, asks
-// GET /v0/beads/context, and returns the advertised capabilities.
-func serveContextCapabilities(t *testing.T, cfg httpapi.Config) []string {
+// listenForTest binds cfg on an ephemeral loopback port for the life of the
+// test and returns its address.
+func listenForTest(t *testing.T, cfg httpapi.Config) string {
 	t.Helper()
 	cfg.Addr = "127.0.0.1:0"
 	cfg.Stdout, cfg.Stderr = io.Discard, io.Discard
@@ -63,8 +63,15 @@ func serveContextCapabilities(t *testing.T, cfg httpapi.Config) []string {
 			t.Error("server did not stop")
 		}
 	})
+	return srv.Addr()
+}
 
-	resp, err := http.Get("http://" + srv.Addr() + "/v0/beads/context")
+// serveContextCapabilities binds cfg on an ephemeral loopback port, asks
+// GET /v0/beads/context, and returns the advertised capabilities.
+func serveContextCapabilities(t *testing.T, cfg httpapi.Config) []string {
+	t.Helper()
+	addr := listenForTest(t, cfg)
+	resp, err := http.Get("http://" + addr + "/v0/beads/context")
 	if err != nil {
 		t.Fatalf("GET /v0/beads/context: %v", err)
 	}
