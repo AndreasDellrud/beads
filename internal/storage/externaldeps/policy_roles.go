@@ -192,6 +192,10 @@ func (c *policyBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBa
 			return issueops.CloseBatchResult{}, err
 		}
 	}
+	if req.Force && req.ClaimNext == nil {
+		// Forced, and no claim to narrow: nothing below would read the edges.
+		return c.inner.CloseBatch(ctx, req)
+	}
 	refs, err := c.policy.policy.Exclusions(ctx, c.policy.edges)
 	if err != nil {
 		return issueops.CloseBatchResult{}, err

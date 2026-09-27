@@ -80,3 +80,23 @@ func (c *fakeReadyClaimer) ClaimNext(ctx context.Context, req publicops.ClaimNex
 	}
 	return publicops.ClaimNextResult{Claimed: rows[0]}, nil
 }
+
+// BatchCloser records what reached the backend's closer.
+func (f *fakeStore) BatchCloser() (publicops.BatchCloser, error) {
+	return &fakeBatchCloser{store: f}, nil
+}
+
+type fakeBatchCloser struct {
+	store    *fakeStore
+	requests []publicops.CloseBatchRequest
+}
+
+func (c *fakeBatchCloser) CloseBatch(_ context.Context, req publicops.CloseBatchRequest) (publicops.CloseBatchResult, error) {
+	c.requests = append(c.requests, req)
+	c.store.closed = append(c.store.closed, "batch")
+	outcomes := make([]publicops.CloseOutcome, len(req.Items))
+	for i, item := range req.Items {
+		outcomes[i] = publicops.CloseOutcome{IssueID: item.IssueID}
+	}
+	return publicops.CloseBatchResult{Outcomes: outcomes}, nil
+}

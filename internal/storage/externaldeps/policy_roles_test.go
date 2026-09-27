@@ -335,3 +335,32 @@ func TestWrapSkipsOnlyServerEnforcedStores(t *testing.T) {
 		t.Error("Wrap(nil) != nil")
 	}
 }
+
+// TestBatchCloserReadsNoEdgesWhenForcedWithoutAClaim: a forced batch skips the
+// close guard and, with no claim to narrow, has no use for the exclusions, so
+// it must not pay the whole-workspace edge read. An unforced batch, or a
+// forced one that earns a claim, still reads them exactly once.
+func TestBatchCloserReadsNoEdgesWhenForcedWithoutAClaim(t *testing.T) {
+	raw, foreign := policyWorkspace()
+	closer, err := testStore(raw, foreign, true).BatchCloser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		req   publicops.CloseBatchRequest
+		reads int
+	}{
+		{"forced, no claim", publicops.CloseBatchRequest{Actor: "w", Force: true, Items: []publicops.BatchCloseItem{{IssueID: "be-unsat"}}}, 0},
+		{"forced, claim", publicops.CloseBatchRequest{Actor: "w", Force: true, Items: []publicops.BatchCloseItem{{IssueID: "be-unsat"}}, ClaimNext: &publicops.ReadyRequest{Sort: "priority"}}, 1},
+		{"unforced", publicops.CloseBatchRequest{Actor: "w", Items: []publicops.BatchCloseItem{{IssueID: "be-plain"}}}, 1},
+	} {
+		before := raw.edgeReads
+		if _, err := closer.CloseBatch(t.Context(), tc.req); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := raw.edgeReads - before; got != tc.reads {
+			t.Errorf("%s read the external edges %d times, want %d", tc.name, got, tc.reads)
+		}
+	}
+}
