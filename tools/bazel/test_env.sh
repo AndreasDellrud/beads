@@ -54,6 +54,10 @@ for d in "${TEST_SRCDIR:-}" "${TEST_TMPDIR:-}" "$root"; do
 done
 export BEADS_CEILING_DIRECTORIES="$ceilings"
 export GIT_CEILING_DIRECTORIES="$ceilings"
+# The migration-freeze marker walk is deliberately not bounded by the ceiling;
+# point it at a path that never exists so a MIGRATION-FREEZE file above the
+# output base cannot make write commands refuse inside tests.
+export BD_MIGRATION_FREEZE_FILE="$root/no-freeze-marker"
 
 # Same scrub as beads_test_env_enter; `--test_env=NAME` on a command line must
 # not be able to point a test at a live workspace or Dolt server.
