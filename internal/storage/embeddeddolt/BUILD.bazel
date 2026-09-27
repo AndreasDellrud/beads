@@ -229,6 +229,7 @@ go_test(
         "//internal/storage/schema",
         "//internal/storage/storagecontract",
         "//internal/storage/versioncontrolops",
+        "//internal/testutil/bazeltest",
         "//internal/types",
         "//internal/workapi",
         "//issueops",
