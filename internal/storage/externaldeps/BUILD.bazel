@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "externaldeps",
     srcs = [
+        "batch_apply_policy.go",
         "decorator.go",
         "policy_roles.go",
         "resolver.go",
@@ -27,6 +28,7 @@ go_library(
 go_test(
     name = "externaldeps_test",
     srcs = [
+        "batch_apply_guard_test.go",
         "batch_close_guard_test.go",
         "decorator_test.go",
         "fake_roles_test.go",

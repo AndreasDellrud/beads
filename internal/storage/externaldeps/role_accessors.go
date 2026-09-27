@@ -108,6 +108,20 @@ func (s *Store) BatchCloser() (issueops.BatchCloser, error) {
 	return closer, nil
 }
 
+// BatchApplier guards the apply-batch items that close (policyBatchApplier)
+// and delegates to the inner store's own applier. Without it the accessor
+// promoted straight to the inner applier, so serve's store arm closed
+// externally blocked issues through POST /v0/beads/batch:apply without force.
+// A flagged item that is already closed is forwarded pinned to that state,
+// because this arm has no transaction to share with the inner applier.
+func (s *Store) BatchApplier() (issueops.BatchApplier, error) {
+	inner, err := s.inner.BatchApplier()
+	if err != nil {
+		return nil, err
+	}
+	return &policyBatchApplier{inner: inner, policy: s.Policy, edges: s.edgeSource(), current: s.inner.GetIssue}, nil
+}
+
 // settleFlaggedClose answers a batch item an unsatisfied external blocker holds
 // WITHOUT sending it to the inner closer (see policyBatchCloser): an issue that
 // is already closed gets the idempotent re-close outcome — Changed false and

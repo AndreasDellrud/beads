@@ -502,6 +502,7 @@ go_test(
         "backup_restore_test.go",
         "backup_status_test.go",
         "backup_test.go",
+        "batch_apply_external_test.go",
         "batch_embedded_test.go",
         "batch_parity_test.go",
         "batch_test.go",

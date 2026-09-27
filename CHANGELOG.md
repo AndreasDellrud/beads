@@ -100,6 +100,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates, deletes and demote-to-wisp.
 
 
+- **`bd serve`'s `POST /v0/beads/issues:batchApply` no longer closes work an
+  unsatisfied `external:` dependency holds back.** On the store arm the
+  applier bypassed the external-dependency policy entirely; on the provider
+  arm it applied it per item inside the write transaction, opening foreign
+  projects there. A close item, or an update item setting `status` to
+  `closed`, on externally blocked work now refuses the whole request (`409
+  not_closable`, nothing written) unless it sends `force` /
+  `force_close_policy` — including when an earlier item of the same request
+  adds the `external:` edge. Re-closing already-closed work stays the
+  idempotent no-op. An apply-batch has no claim, so nothing there is a claim
+  refusal. On the provider arm a closing update item sent with
+  `force_close_policy` was refused anyway; it now lands.
+
 - **`bd update --claim` no longer claims work an unsatisfied `external:`
   dependency holds back.** On both the direct and the `--proxied-server`
   route the claim went straight to the backend's compare-and-set, past the

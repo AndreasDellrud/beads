@@ -324,11 +324,14 @@ func (p *uowProvider) BatchCloser() (publicops.BatchCloser, error) {
 // a flagged item unless that item is already closed IN THE SAME TRANSACTION,
 // so the re-close exemption and the close are one atomic decision.
 //
-// It overrides the two close use-case methods and nothing else — in particular
-// not the ready reads the batch's ClaimNext runs, whose exclusions the policy
-// closer already put on the request. Building the batch over the policy
-// provider instead would apply the ready policy a second time, inside the
-// write transaction.
+// It overrides the two close use-case methods, and ApplyUpdate for an update
+// that sets the status to closed (an apply-batch update item), and nothing
+// else — in particular not the ready reads the batch's ClaimNext runs, whose
+// exclusions the policy closer already put on the request. Building the batch
+// over the policy provider instead would apply the ready policy a second time,
+// inside the write transaction. The same guard serves an apply-batch
+// (policyBatchApplier), whose close and closing-update items reach exactly
+// these three methods.
 type batchCloseGuard struct {
 	uow.UnitOfWorkProvider
 	flagged map[string][]string
@@ -381,6 +384,18 @@ func (u *batchCloseGuardIssues) CloseIssueChecked(ctx context.Context, id string
 	return u.IssueUseCase.CloseIssueChecked(ctx, id, params, actor, force)
 }
 
+// ApplyUpdate guards an update that sets a flagged item's status to closed —
+// an apply-batch update item — with the close methods' check. A forced update
+// (ForceClosePolicy, carried as the OpForceClosePolicy marker) is not guarded.
+func (u *batchCloseGuardIssues) ApplyUpdate(ctx context.Context, id string, spec domain.UpdateSpec, actor string) (*types.Issue, error) {
+	if isClosedUpdate(spec.Fields) {
+		if err := u.guard(ctx, id, forcedUpdate(spec.Fields)); err != nil {
+			return nil, err
+		}
+	}
+	return u.IssueUseCase.ApplyUpdate(ctx, id, spec, actor)
+}
+
 func (u *batchCloseGuardIssues) CloseWispChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {
 	if err := u.guard(ctx, id, force); err != nil {
 		return domain.CloseIssueResult{}, err
@@ -393,8 +408,28 @@ func (p *uowProvider) BatchCreator() (publicops.BatchCreator, error) {
 func (p *uowProvider) DependencyEditor() (publicops.DependencyEditor, error) {
 	return uow.NewDependencyEditor(p)
 }
+
+// BatchApplier guards the apply-batch items that close with the SAME wrapper
+// as the store arm (policyBatchApplier): one edge read and the closing items'
+// foreign refs resolved before the batch's transaction, and the batch itself
+// run over the UNDECORATED provider — it used to be built over this wrapper,
+// whose use-case overrides re-read the edges and opened every referenced
+// foreign project inside the write transaction, once per closing item. A
+// flagged item's re-close exemption is decided inside the batch's own
+// transaction by batchCloseGuard.
 func (p *uowProvider) BatchApplier() (publicops.BatchApplier, error) {
-	return uow.NewBatchApplier(p)
+	inner, err := uow.NewBatchApplier(p.UnitOfWorkProvider)
+	if err != nil {
+		return nil, err
+	}
+	return &policyBatchApplier{
+		inner:  inner,
+		policy: p.policy,
+		edges:  p.externalEdges,
+		guarded: func(flagged map[string][]string) (publicops.BatchApplier, error) {
+			return uow.NewBatchApplier(&batchCloseGuard{UnitOfWorkProvider: p.UnitOfWorkProvider, flagged: flagged})
+		},
+	}, nil
 }
 func (p *uowProvider) Deleter() (publicops.Deleter, error)   { return uow.NewDeleter(p) }
 func (p *uowProvider) Sweeper() (publicops.Sweeper, error)   { return uow.NewSweeper(p) }
@@ -738,6 +773,12 @@ func (u *issueUseCase) ApplyUpdate(ctx context.Context, id string, spec domain.U
 		}
 	}
 	return u.IssueUseCase.ApplyUpdate(ctx, id, spec, actor)
+}
+
+// forcedUpdate reports whether an update spec carries ForceClosePolicy.
+func forcedUpdate(fields map[string]any) bool {
+	forced, _ := fields[issueops.OpForceClosePolicy].(bool)
+	return forced
 }
 
 func isClosedUpdate(fields map[string]any) bool {
