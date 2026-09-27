@@ -19,7 +19,11 @@ import (
 type externalEdgesProvider struct {
 	*fakeProvider
 	edges map[string][]*types.Dependency
-	reads *int
+	// reads counts reads of the whole workspace's external edges; ownReads,
+	// when set, reads of named issues' own records, which is all a guard on
+	// one issue makes.
+	reads    *int
+	ownReads *int
 	// ready, when set, answers the ready-shaped use-case methods, so the
 	// served ready list, count and claim-next have a front to read.
 	ready *readyIssues
@@ -114,27 +118,41 @@ func (d externalEdgesDeps) GetExternalBlockingDependencyRecords(context.Context)
 	return d.p.edges, nil
 }
 
+// GetIssueDependencyRecords answers ids' own records, as the real query does:
+// on this fake an issue's only records are its `external:` edges.
+func (d externalEdgesDeps) GetIssueDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	if d.p.ownReads != nil {
+		*d.p.ownReads++
+	}
+	out := make(map[string][]*types.Dependency, len(ids))
+	for _, id := range ids {
+		out[id] = d.p.edges[id]
+	}
+	return out, nil
+}
+
 // servedPolicyProvider wraps the fake in the external-capability policy exactly
 // as `bd serve` wraps its provider (wireExternalDependencyUOWProvider). The
 // locator resolves no project, so every `external:` blocker is unsatisfied.
-func servedPolicyProvider(issues *fakeIssues, edges map[string][]*types.Dependency, reads *int) uow.UnitOfWorkProvider {
-	inner := externalEdgesProvider{fakeProvider: &fakeProvider{issues: issues}, edges: edges, reads: reads}
+func servedPolicyProvider(issues *fakeIssues, edges map[string][]*types.Dependency, reads, ownReads *int) uow.UnitOfWorkProvider {
+	inner := externalEdgesProvider{fakeProvider: &fakeProvider{issues: issues}, edges: edges, reads: reads, ownReads: ownReads}
 	return externaldeps.WrapUOWProvider(inner, func(externaldeps.ProjectName) (string, bool) { return "", false }, nil)
 }
 
 // TestServedClaimRefusesExternallyBlockedWork pins the claim endpoint on serve's
 // PROVIDER arm: an issue held back by an unsatisfied `external:` blocker is
 // refused before the compare-and-set runs, as the store arm and `bd update
-// --claim` refuse it. The policy reads the local edges TWICE for the request:
-// once before the claim's write transaction, to resolve the foreign projects
-// with no transaction open, and once inside it, so an edge committed in
-// between is still seen (externaldeps.preResolved).
+// --claim` refuse it. The policy reads the claimed issue's own edges TWICE for
+// the request — once before the claim's write transaction, to resolve the
+// foreign projects with no transaction open, and once inside it, so an edge
+// committed in between is still seen (externaldeps.preResolved) — and never
+// the whole workspace's.
 func TestServedClaimRefusesExternallyBlockedWork(t *testing.T) {
 	issues := &fakeIssues{issue: seededIssue("bd-1", "", types.StatusOpen)}
-	reads := 0
+	reads, ownReads := 0, 0
 	provider := servedPolicyProvider(issues, map[string][]*types.Dependency{
 		"bd-1": {{IssueID: "bd-1", DependsOnID: "external:remote:payments", Type: types.DepBlocks}},
-	}, &reads)
+	}, &reads, &ownReads)
 	ts := newTestServer(t, Config{Provider: provider})
 
 	resp := ts.claim(t, claimPath, `{"actor":"alice"}`)
@@ -151,14 +169,14 @@ func TestServedClaimRefusesExternallyBlockedWork(t *testing.T) {
 		!strings.Contains(body, "blocked by an unsatisfied dependency") || strings.Contains(body, "force") {
 		t.Errorf("served refusal = %d %s, want 409 not_claimable naming the blocker", resp.StatusCode, body)
 	}
-	if reads != 2 {
-		t.Errorf("the request read the external edges %d times, want exactly 2 (pre-resolution, then in the claim's transaction)", reads)
+	if ownReads != 2 || reads != 0 {
+		t.Errorf("the request read the claimed issue's edges %d times and the workspace's %d times, want exactly 2 (pre-resolution, then in the claim's transaction) and 0", ownReads, reads)
 	}
 
 	// The same server claims the issue once the blocker is gone, so the
 	// refusal above is the policy's and not the fake's.
 	unblocked := &fakeIssues{issue: seededIssue("bd-1", "", types.StatusOpen)}
-	ts = newTestServer(t, Config{Provider: servedPolicyProvider(unblocked, nil, &reads)})
+	ts = newTestServer(t, Config{Provider: servedPolicyProvider(unblocked, nil, &reads, nil)})
 	if resp := ts.claim(t, claimPath, `{"actor":"alice"}`); resp.StatusCode != http.StatusOK {
 		t.Fatalf("served claim of an unblocked issue: status %d: %s", resp.StatusCode, readAll(t, resp))
 	}
