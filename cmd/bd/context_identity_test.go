@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/contextinfo"
@@ -83,6 +84,10 @@ func TestContextRoutesNameOneWorkspaceTheSameWay(t *testing.T) {
 			}
 			t.Chdir(dir)
 			t.Setenv("BEADS_DIR", beadsDir)
+			// git caches the cwd's repository context process-wide; a test
+			// that ran earlier from a non-repo directory would otherwise make
+			// this fresh repo look like "not a git repository".
+			git.ResetCaches()
 			beads.ResetCaches()
 			t.Cleanup(beads.ResetCaches)
 
