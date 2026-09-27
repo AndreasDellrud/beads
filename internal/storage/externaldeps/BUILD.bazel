@@ -36,6 +36,7 @@ go_test(
         "fake_roles_test.go",
         "forced_update_close_test.go",
         "policy_roles_test.go",
+        "ready_budget_test.go",
         "ready_wake_test.go",
         "uow_claim_guard_test.go",
         "uow_decorator_test.go",

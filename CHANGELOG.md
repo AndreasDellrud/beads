@@ -438,8 +438,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stderr under `--json`. JSON stdout is unchanged — the pagination envelope
   already carried `total` — and so is every untruncated listing, including
   gc's `bd ready --json --include-ephemeral --limit 0` (a plain array). The
-  proxied listing's page and total now come from one read-only unit of work
-  instead of two.
+  proxied listing's page and its total now come from one read-only unit of
+  work (a truncated page used to count in a second one), but the
+  `external:` dependency policy now reads its edges in its own read-only unit
+  of work before the listing, so foreign projects are resolved with no
+  transaction open. A proxied listing therefore opens three units of work
+  (edge read, defer wake, listing): one more than before for an untruncated
+  listing such as gc's, and the same number for a truncated one.
 
 - **`bd ready`'s direct listing is one read in every output mode, and its
   directory-label scope is normalized.** The listing now goes through the
