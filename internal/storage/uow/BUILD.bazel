@@ -83,6 +83,7 @@ go_test(
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
+        "batch_notification_buffer_test.go",
         "blocking_annotator_contract_test.go",
         "bootstrapper_contract_test.go",
         "claimer_contract_test.go",

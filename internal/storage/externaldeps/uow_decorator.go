@@ -285,13 +285,7 @@ func (p *uowProvider) ReadyClaimer() (publicops.ReadyClaimer, error) {
 // readyPolicy reads the edges in a read-only unit of work of the undecorated
 // provider, one per call.
 func (p *uowProvider) readyPolicy() readyPolicy {
-	return readyPolicy{policy: p.policy, edges: p.externalEdges, closed: p.issueClosed}
-}
-
-func (p *uowProvider) issueClosed(ctx context.Context, id string) (bool, error) {
-	return uow.RunTxRead(ctx, p.UnitOfWorkProvider, func(ctx context.Context, uw uow.UnitOfWork) (bool, error) {
-		return closedInUOW(ctx, uw.IssueUseCase(), id)
-	})
+	return readyPolicy{policy: p.policy, edges: p.externalEdges}
 }
 
 func (p *uowProvider) externalEdges(ctx context.Context) (map[string][]*types.Dependency, error) {
@@ -318,7 +312,80 @@ func (p *uowProvider) BatchCloser() (publicops.BatchCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newPolicyBatchCloser(inner, p.readyPolicy()), nil
+	closer := newPolicyBatchCloser(inner, p.readyPolicy())
+	closer.guarded = func(flagged map[string][]string) (publicops.BatchCloser, error) {
+		return uow.NewBatchCloser(&batchCloseGuard{UnitOfWorkProvider: p.UnitOfWorkProvider, flagged: flagged})
+	}
+	return closer, nil
+}
+
+// batchCloseGuard is the undecorated provider for ONE batch close, plus the
+// items an unsatisfied external blocker holds. Its units of work refuse closing
+// a flagged item unless that item is already closed IN THE SAME TRANSACTION,
+// so the re-close exemption and the close are one atomic decision.
+//
+// It overrides the two close use-case methods and nothing else — in particular
+// not the ready reads the batch's ClaimNext runs, whose exclusions the policy
+// closer already put on the request. Building the batch over the policy
+// provider instead would apply the ready policy a second time, inside the
+// write transaction.
+type batchCloseGuard struct {
+	uow.UnitOfWorkProvider
+	flagged map[string][]string
+}
+
+func (p *batchCloseGuard) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
+	inner, err := p.UnitOfWorkProvider.NewUOW(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &batchCloseGuardUOW{UnitOfWork: inner, flagged: p.flagged}, nil
+}
+
+type batchCloseGuardUOW struct {
+	uow.UnitOfWork
+	flagged map[string][]string
+}
+
+// Unwrap keeps the transaction runner reachable, as unitOfWork.Unwrap does.
+func (u *batchCloseGuardUOW) Unwrap() uow.UnitOfWork { return u.UnitOfWork }
+
+func (u *batchCloseGuardUOW) IssueUseCase() domain.IssueUseCase {
+	return &batchCloseGuardIssues{IssueUseCase: u.UnitOfWork.IssueUseCase(), flagged: u.flagged}
+}
+
+type batchCloseGuardIssues struct {
+	domain.IssueUseCase
+	flagged map[string][]string
+}
+
+func (u *batchCloseGuardIssues) guard(ctx context.Context, id string, force bool) error {
+	blockers := u.flagged[id]
+	if force || len(blockers) == 0 {
+		return nil
+	}
+	closed, err := closedInUOW(ctx, u.IssueUseCase, id)
+	if err != nil {
+		return err
+	}
+	if !closed {
+		return externallyBlocked(id, blockers)
+	}
+	return nil
+}
+
+func (u *batchCloseGuardIssues) CloseIssueChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {
+	if err := u.guard(ctx, id, force); err != nil {
+		return domain.CloseIssueResult{}, err
+	}
+	return u.IssueUseCase.CloseIssueChecked(ctx, id, params, actor, force)
+}
+
+func (u *batchCloseGuardIssues) CloseWispChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {
+	if err := u.guard(ctx, id, force); err != nil {
+		return domain.CloseIssueResult{}, err
+	}
+	return u.IssueUseCase.CloseWispChecked(ctx, id, params, actor, force)
 }
 func (p *uowProvider) BatchCreator() (publicops.BatchCreator, error) {
 	return uow.NewBatchCreator(p)

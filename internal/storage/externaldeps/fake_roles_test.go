@@ -93,6 +93,7 @@ type fakeBatchCloser struct {
 
 func (c *fakeBatchCloser) CloseBatch(_ context.Context, req publicops.CloseBatchRequest) (publicops.CloseBatchResult, error) {
 	c.requests = append(c.requests, req)
+	c.store.batchReqs = append(c.store.batchReqs, req)
 	c.store.closed = append(c.store.closed, "batch")
 	outcomes := make([]publicops.CloseOutcome, len(req.Items))
 	for i, item := range req.Items {

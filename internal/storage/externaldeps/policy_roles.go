@@ -44,14 +44,10 @@ import (
 // roles resolve the FOREIGN half first, outside the write transaction
 // (preResolved), so the in-transaction check reads only local edges.
 
-// readyPolicy binds the policy to the edge source of one seam, and to that
-// seam's way of asking whether an issue is already closed.
+// readyPolicy binds the policy to the edge source of one seam.
 type readyPolicy struct {
 	policy *Policy
 	edges  EdgeSource
-	// closed reports whether id is already closed. The close guards ask it only
-	// for an issue an external blocker holds, so the common close pays nothing.
-	closed ClosedSource
 }
 
 // ClosedSource reports whether an issue is already closed. A miss is false.
@@ -191,17 +187,43 @@ var (
 // ready exclusions on the claim a batch earns, then delegates to a closer that
 // applies neither. One edge read serves both.
 //
+// An item an unsatisfied external blocker holds ("flagged") is refused unless
+// it is ALREADY closed — the idempotent re-close every close path promises
+// (ga-ktn9pe.4.8). That exemption must be decided ATOMICALLY with the close:
+// deciding it on a status read taken before the batch, and then sending the
+// item, let a concurrent reopen between the two turn the "re-close" into a
+// real close of externally blocked work without --force. Each arm therefore
+// decides it where it can be atomic:
+//
+//   - unit-of-work arm (guarded): the flagged ids go into the batch, and the
+//     closer built for THIS call checks "already closed?" inside the batch's
+//     own transaction, immediately before the close (batchCloseGuard). The
+//     check costs nothing for an unflagged item and opens no extra unit of
+//     work for a flagged one.
+//   - store arm (settle): storage.DoltStorage publishes no transaction a
+//     wrapper could share with the inner closer, so a flagged item is NEVER
+//     sent to it. settle answers it from a read: an already-closed item gets
+//     the idempotent re-close outcome (Changed false, the hydrated row), any
+//     other is refused. Nothing is written for it, so a concurrent reopen can
+//     at worst make the report "already closed" describe the moment of the
+//     read — never close the issue.
+//
 // A refused item is SKIPPED, not sent: the inner batch closes the survivors
 // in one transaction and the refusal lands at the item's own index, which is
-// the BatchCloser contract for any per-item refusal. A batch whose items were
-// all refused never reaches the inner closer, so it lands nothing and earns no
+// the BatchCloser contract for any per-item refusal. A batch that sends
+// nothing never reaches the inner closer, so it lands nothing and earns no
 // claim — exactly what the contract says a batch that closed nothing does.
 type policyBatchCloser struct {
 	inner  issueops.BatchCloser
 	policy readyPolicy
+	// guarded (unit-of-work arm) builds the closer for one call whose
+	// transaction refuses each flagged id unless it is already closed there.
+	guarded func(flagged map[string][]string) (issueops.BatchCloser, error)
+	// settle (store arm) answers one flagged item without sending it.
+	settle func(ctx context.Context, item issueops.BatchCloseItem, blockers []string) issueops.CloseOutcome
 }
 
-func newPolicyBatchCloser(inner issueops.BatchCloser, policy readyPolicy) issueops.BatchCloser {
+func newPolicyBatchCloser(inner issueops.BatchCloser, policy readyPolicy) *policyBatchCloser {
 	return &policyBatchCloser{inner: inner, policy: policy}
 }
 
@@ -227,13 +249,19 @@ func (c *policyBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBa
 	sent := make([]int, 0, len(req.Items))
 	forwarded := req
 	forwarded.Items = make([]issueops.BatchCloseItem, 0, len(req.Items))
+	var flagged map[string][]string
 	for i, item := range req.Items {
 		if blockers := refs[item.IssueID]; !req.Force && len(blockers) > 0 {
-			refused, err := closeRefused(ctx, c.policy.closed, item.IssueID, blockers)
-			if err != nil {
-				return issueops.CloseBatchResult{}, err
-			}
-			if refused {
+			switch {
+			case c.guarded != nil:
+				if flagged == nil {
+					flagged = make(map[string][]string)
+				}
+				flagged[item.IssueID] = blockers
+			case c.settle != nil:
+				outcomes[i] = c.settle(ctx, item, blockers)
+				continue
+			default:
 				outcomes[i] = issueops.CloseOutcome{IssueID: item.IssueID, Err: externallyBlocked(item.IssueID, blockers)}
 				continue
 			}
@@ -250,7 +278,13 @@ func (c *policyBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBa
 		forwarded.ClaimNext = &claim
 	}
 
-	result, err := c.inner.CloseBatch(ctx, forwarded)
+	inner := c.inner
+	if len(flagged) > 0 {
+		if inner, err = c.guarded(flagged); err != nil {
+			return issueops.CloseBatchResult{}, err
+		}
+	}
+	result, err := inner.CloseBatch(ctx, forwarded)
 	if err != nil {
 		return issueops.CloseBatchResult{}, err
 	}

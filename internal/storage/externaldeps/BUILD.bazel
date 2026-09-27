@@ -27,6 +27,7 @@ go_library(
 go_test(
     name = "externaldeps_test",
     srcs = [
+        "batch_close_guard_test.go",
         "decorator_test.go",
         "fake_roles_test.go",
         "policy_roles_test.go",

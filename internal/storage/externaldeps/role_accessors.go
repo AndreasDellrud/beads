@@ -55,7 +55,7 @@ func (s *Store) ReadyLister() (issueops.ReadyLister, error) {
 // readyPolicy reads this store's edges from beneath every decorator, the same
 // source the store-level overrides use.
 func (s *Store) readyPolicy() readyPolicy {
-	return readyPolicy{policy: s.Policy, edges: s.edgeSource(), closed: s.issueClosed}
+	return readyPolicy{policy: s.Policy, edges: s.edgeSource()}
 }
 
 // issueClosed answers the re-close exemption from beneath every decorator.
@@ -104,7 +104,38 @@ func (s *Store) BatchCloser() (issueops.BatchCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newPolicyBatchCloser(inner, s.readyPolicy()), nil
+	closer := newPolicyBatchCloser(inner, s.readyPolicy())
+	closer.settle = s.settleFlaggedClose
+	return closer, nil
+}
+
+// settleFlaggedClose answers a batch item an unsatisfied external blocker holds
+// WITHOUT sending it to the inner closer (see policyBatchCloser): an issue that
+// is already closed gets the idempotent re-close outcome — Changed false and
+// the row hydrated the way a close outcome is (labels and dependency records,
+// no comments) — and anything else is refused. Nothing is written either way.
+func (s *Store) settleFlaggedClose(ctx context.Context, item issueops.BatchCloseItem, blockers []string) issueops.CloseOutcome {
+	refused := issueops.CloseOutcome{IssueID: item.IssueID, Err: externallyBlocked(item.IssueID, blockers)}
+	current, err := s.inner.GetIssue(ctx, item.IssueID)
+	if err != nil {
+		return issueops.CloseOutcome{IssueID: item.IssueID, Err: err}
+	}
+	if current == nil || current.Status != types.StatusClosed {
+		return refused
+	}
+	labels, err := s.inner.GetLabels(ctx, item.IssueID)
+	if err != nil {
+		return issueops.CloseOutcome{IssueID: item.IssueID, Err: err}
+	}
+	deps, err := s.inner.GetDependencyRecords(ctx, item.IssueID)
+	if err != nil {
+		return issueops.CloseOutcome{IssueID: item.IssueID, Err: err}
+	}
+	snapshot := *current
+	snapshot.Labels = labels
+	snapshot.Dependencies = deps
+	snapshot.Comments = nil
+	return issueops.CloseOutcome{IssueID: item.IssueID, Issue: &snapshot, Changed: false}
 }
 
 // ReadyClaimer narrows the claim's filter and delegates to the inner store's

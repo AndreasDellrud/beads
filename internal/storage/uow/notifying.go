@@ -580,10 +580,29 @@ func (u *notifyingUOW) rewindNotifications(mark int) {
 // markBatchNotifications returns a rewind token for a batch item's close, or -1
 // when this unit of work buffers nothing.
 func markBatchNotifications(uw UnitOfWork) int {
-	if buf, ok := uw.(batchNotificationBuffer); ok {
+	if buf, ok := batchNotificationBufferOf(uw); ok {
 		return buf.markNotifications()
 	}
 	return -1
+}
+
+// batchNotificationBufferOf finds the recording buffer at or beneath uw. A
+// policy decorator between the batch body and the notifying unit of work (the
+// external-dependency batch-close guard is one) forwards Unwrap, and must not
+// hide the buffer: without it a batch's idempotent re-close would announce
+// itself (ga-2yaqp.1) whenever such a decorator sat in the way.
+func batchNotificationBufferOf(uw UnitOfWork) (batchNotificationBuffer, bool) {
+	for uw != nil {
+		if buf, ok := uw.(batchNotificationBuffer); ok {
+			return buf, true
+		}
+		unwrapper, ok := uw.(unitOfWorkUnwrapper)
+		if !ok {
+			return nil, false
+		}
+		uw = unwrapper.Unwrap()
+	}
+	return nil, false
 }
 
 // rewindBatchNotifications drops whatever a batch item's close buffered. The
@@ -594,7 +613,7 @@ func rewindBatchNotifications(uw UnitOfWork, mark int) {
 	if mark < 0 {
 		return
 	}
-	if buf, ok := uw.(batchNotificationBuffer); ok {
+	if buf, ok := batchNotificationBufferOf(uw); ok {
 		buf.rewindNotifications(mark)
 	}
 }

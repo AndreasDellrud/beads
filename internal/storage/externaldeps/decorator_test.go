@@ -26,6 +26,8 @@ type fakeStore struct {
 	blockerIDs []string
 	closed     []string
 	lifecycle  publicops.Lifecycle
+	// batchReqs records every request that reached the backend's closer.
+	batchReqs []publicops.CloseBatchRequest
 	// edgeReads counts every whole-workspace edge read the policy makes,
 	// through either the narrow query or the compatibility fallback.
 	edgeReads int
