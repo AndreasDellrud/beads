@@ -34,7 +34,7 @@ test:prcore --test_env=BEADS_TEST_SKIP=dolt
 # As in pr.yml's PR Core step: a root or non-POSIX executor fails
 # TestAddExcludePatternsRefusesReadErrors instead of skipping it.
 test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
-test:prcore --test_tag_filters=-requires-docker,-embedded,-manual
+test:prcore --test_tag_filters=-requires-docker,-dolt-server,-embedded,-manual
 
 test:ci --config=prcore
 test:ci --keep_going --test_summary=terse
@@ -96,6 +96,29 @@ test:embedded --test_timeout=-1,-1,-1,1200
 test:embedded --test_arg=-test.parallel=4
 test:embedded --test_env=GO_TEST_WRAP_TESTV=1
 test:embedded --remote_download_regex=.*/test\.xml$
+
+# Dolt-server lane: the same jobs as the docker lane ("Test (storage domain +
+# uow)" and "Contract corpus"), but every dolt sql-server is a child of the
+# test process, started from the pinned dolt in the test wrapper's runfiles
+# (BEADS_TEST_DOLT_SERVER=local, set by each dolt-server target), so the
+# targets run on remote workers and need no docker. Same selection rules as
+# test:docker: race (//cmd/bd/protocol's variant opts out, like its job), no
+# -short, no BEADS_TEST_SKIP=dolt, -test.parallel=4, and the no--short twins
+# of the job's other packages. Results are cacheable: every input (test
+# binary, dolt, env) is in the action key, and a server that cannot start
+# fails the target (BEADS_TEST_REQUIRE_DOLT_CONTAINER=1) instead of skipping.
+# --config=docker stays as the A/B control. test.xml is downloaded for
+# tools/bazel/equivalence.py --job, test.log for bazel.yml's failure artifact.
+test:doltserver --@rules_go//go/config:race
+test:doltserver --test_tag_filters=dolt-server
+test:doltserver --build_tests_only
+test:doltserver --keep_going
+test:doltserver --test_env=GO_TEST_WRAP_TESTV=1
+test:doltserver --test_arg=-test.parallel=4
+# Locally (fork PRs, rbe=off, no executor): at most 4 test processes, as in
+# test:docker; remote workers are not limited by it.
+test:doltserver --local_test_jobs=4
+test:doltserver --remote_download_regex=.*/test\.(log|xml)$
 
 # Pure-Go lane: pr.yml's "Check pure-Go and js/wasm boundaries
 # (CGO_ENABLED=0)" job. CGO is off for every Go target (rules_go drops

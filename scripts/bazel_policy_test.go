@@ -675,8 +675,12 @@ var allowedBazelTestTags = map[string]string{
 	"no-remote-exec":  "must run on the Bazel client's host, never on a remote worker",
 	"no-remote-cache": "result depends on the host, so it is neither read from nor uploaded to the remote cache",
 	"requires-docker": "needs a docker daemon; excluded from --config=prcore/ci, run by --config=docker",
-	"embedded":        "embedded-Dolt tier variant; its own config",
-	"manual":          "never part of //...: a repro/bench harness, or a build input only another target needs",
+	// No no-remote-exec: the target starts its own dolt sql-server from the
+	// pinned dolt in its runfiles, so it runs on any worker, and a server that
+	// cannot start fails it rather than skipping, so its cached result holds.
+	"dolt-server": "starts hermetic dolt sql-servers (or completes the lane's job without -short); excluded from --config=prcore/ci, run by --config=doltserver",
+	"embedded":    "embedded-Dolt tier variant; its own config",
+	"manual":      "never part of //...: a repro/bench harness, or a build input only another target needs",
 }
 
 // bazelTagsRequiring maps tags whose targets depend on the host to the tags
@@ -854,7 +858,7 @@ func checkBazelrcPrcoreTagFilter(bazelrc string) error {
 		for _, f := range strings.Split(strings.TrimPrefix(o.flag, "--test_tag_filters="), ",") {
 			filters[f] = true
 		}
-		for _, tag := range []string{"requires-docker", "embedded", "manual"} {
+		for _, tag := range []string{"requires-docker", "dolt-server", "embedded", "manual"} {
 			if !filters["-"+tag] {
 				return errors.New(o.config + " --test_tag_filters does not exclude " + tag)
 			}
@@ -871,8 +875,9 @@ func TestBazelrcPrcoreExcludesNonPRTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, rc := range map[string]string{
-		"missing":   "test:ci --keep_going\n",
-		"no docker": "test:prcore --test_tag_filters=-embedded,-manual\n",
+		"missing":        "test:ci --keep_going\n",
+		"no docker":      "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n",
+		"no dolt-server": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n",
 		"ci override": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
 			"test:ci --config=prcore\ntest:ci --test_tag_filters=requires-docker\n",
 		"second prcore line": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
