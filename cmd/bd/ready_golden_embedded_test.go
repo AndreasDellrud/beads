@@ -132,7 +132,7 @@ func checkReadyGolden(t *testing.T, goldenDir string, tc readyGoldenCase, stdout
 		"--- exit: " + exit + "\n" +
 		"--- stdout\n" + normalizeReadyGolden(stdout) +
 		"--- stderr\n" + normalizeReadyGolden(stderr)
-	path := filepath.Join("testdata", goldenDir, tc.name+".golden")
+	path := filepath.Join(packageDir(t), "testdata", goldenDir, tc.name+".golden")
 	if *updateReadyGolden {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

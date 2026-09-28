@@ -280,9 +280,11 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	if storage.RoleFiresHooks(roles.batchApplier) {
 		t.Error("bd serve would run this workspace's hooks once per item of every HTTP plan")
 	}
-	if roles.batchApplier != issueops.BatchApplier(middle.batchApplier) {
-		t.Errorf("batch applier came from %p, want the layer directly beneath the hooks (%p)",
-			roles.batchApplier, middle.batchApplier)
+	// Like the batch closer, the applier is policy-wrapped on the store arm (the
+	// external close guard applies to its closing items), so it deliberately has
+	// a distinct identity from the raw applier beneath the hooks.
+	if roles.batchApplier == nil {
+		t.Error("bd serve lost the batch applier while peeling hooks")
 	}
 
 	// The compare-and-set is the FIFTH, and a coordination loop is its designed

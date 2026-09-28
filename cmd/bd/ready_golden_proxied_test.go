@@ -91,7 +91,7 @@ func TestReadyGoldenRoutesAgree(t *testing.T) {
 		"text_max_rows_refused.golden": true,
 		"json_max_rows_refused.golden": true,
 	}
-	direct, err := filepath.Glob(filepath.Join("testdata", "ready_golden", "*.golden"))
+	direct, err := filepath.Glob(filepath.Join(packageDir(t), "testdata", "ready_golden", "*.golden"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestReadyGoldenRoutesAgree(t *testing.T) {
 		if routeSpecific[name] {
 			continue
 		}
-		proxied, err := os.ReadFile(filepath.Join("testdata", "ready_golden_proxied", name))
+		proxied, err := os.ReadFile(filepath.Join(packageDir(t), "testdata", "ready_golden_proxied", name))
 		if os.IsNotExist(err) {
 			continue
 		}
