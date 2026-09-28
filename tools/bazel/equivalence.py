@@ -38,7 +38,9 @@ Bazel must run no other test in those packages, and no test the job passed may
 be skipped under Bazel. A test seen in several targets (a go_test and its
 go_test_variant.sh sh_test) keeps its best status here, since each variant is
 a different way of running it and the job needs one run that does what it
-does; the default mode keeps the worst.
+does; the default mode keeps the worst. A failure in any target still fails a
+job comparison (listed per target), and so does a missing test.xml of any
+target in the job's packages, variant or not.
 
 Divergences listed in the allowlist (tools/bazel/equivalence_allowlist.txt)
 are expected; anything else fails. The allowlist format is one entry per line:
@@ -205,14 +207,22 @@ def testlog_xmls(testlogs, label, shard_count):
     return [os.path.join(base, f"shard_{i}_of_{shard_count}", "test.xml") for i in range(1, shard_count + 1)]
 
 
-def bazel_observed(tested, testlogs, go_tests, best=False, observed=None):
-    """Return ({pkg: {test: status}}, [problems]), merged into observed."""
+def bazel_observed(tested, testlogs, go_tests, best=False, observed=None, failures=None, no_xml=None):
+    """Return ({pkg: {test: status}}, [problems]), merged into observed.
+
+    Job mode (best) also collects (pkg, "Test (label)") for every failed test
+    in failures and (pkg, label) for every missing test.xml in no_xml."""
     observed, problems = ({} if observed is None else observed), []
     for label, n in sorted(tested.items()):
         pkg = label_pkg(label)
         per = observed.setdefault(pkg, {})
         for xml_path in testlog_xmls(testlogs, label, n):
             if not os.path.exists(xml_path):
+                if best and no_xml is not None:
+                    # Bazel writes a test.xml for every test, so a variant's
+                    # is missing only if it was never downloaded.
+                    no_xml.append((pkg, f"{label}: {os.path.relpath(xml_path, testlogs)}"))
+                    continue
                 if label not in go_tests:
                     continue  # an sh_test that is not a variant may write none
                 problems.append(f"{label}: {xml_path} missing (was test.xml downloaded? run with --config=ci)")
@@ -235,6 +245,8 @@ def bazel_observed(tested, testlogs, go_tests, best=False, observed=None):
                     status = "skipped"
                 else:
                     status = "passed"
+                if status == "failed" and failures is not None:
+                    failures.append((pkg, f"{name} ({label})"))
                 # A test seen in several targets keeps its worst status (best in
                 # job mode).
                 rank = BEST_RANK if best else STATUS_RANK
@@ -308,6 +320,7 @@ def main(argv=None):
 
     expected, dirs = go_expected(root, args.go_list_json)
     observed, problems, configured, tested = {}, [], set(), {}
+    failures, no_xml = [], []
     for bep in args.bep:
         bep_tested, bep_configured, bep_testlogs = read_bep(bep)
         configured |= bep_configured
@@ -315,7 +328,9 @@ def main(argv=None):
         # Prefer the BEP's own testlogs dir: the bazel-testlogs symlink follows
         # whatever bazel command ran last, possibly in another output base.
         testlogs = args.testlogs or bep_testlogs or os.path.join(root, "bazel-testlogs")
-        _, bep_problems = bazel_observed(bep_tested, testlogs, bep_configured, args.job, observed)
+        _, bep_problems = bazel_observed(
+            bep_tested, testlogs, bep_configured, args.job, observed,
+            failures if args.job else None, no_xml if args.job else None)
         problems += bep_problems
     target_pkgs = None if (args.no_query or args.job) else query_go_test_pkgs(root, args.bazel)
     go_status = go_test_statuses(args.go_test_json, dirs) if args.go_test_json else None
@@ -324,6 +339,8 @@ def main(argv=None):
         # ran are out of scope.
         expected = {pkg: set(ts) for pkg, ts in go_status.items()}
         observed = {pkg: seen for pkg, seen in observed.items() if pkg in expected}
+        failures = sorted(set(f for f in failures if f[0] in expected))
+        no_xml = sorted(set(m for m in no_xml if m[0] in expected))
 
     no_target, missing, extra, allowlisted = [], [], [], []
     if target_pkgs is not None:
@@ -366,7 +383,7 @@ def main(argv=None):
         for s in seen.values():
             statuses[s] += 1
     n_expected = sum(len(v) for v in expected.values())
-    ok = not (no_target or missing or extra or skip_div or allow_errors)
+    ok = not (no_target or missing or extra or skip_div or failures or no_xml or allow_errors)
 
     limit = None if args.details else 40
 
@@ -400,6 +417,8 @@ def main(argv=None):
         ("tests go test runs that Bazel did not", missing),
         ("tests Bazel ran that go test would not", extra),
         ("tests go test passed that Bazel skipped", skip_div),
+        ("tests that failed in a Bazel target", failures),
+        ("Bazel targets without test.xml", no_xml),
     ):
         if pairs:
             lines += listing(title, pairs)
