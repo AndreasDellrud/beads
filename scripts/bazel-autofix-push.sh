@@ -47,6 +47,10 @@
 # exit 1 on a refused patch or a genuine error so the workflow surfaces them.
 
 set -euo pipefail
+if ((BASH_VERSINFO[0] < 4)); then
+	echo "bazel-autofix-push.sh: bash >= 4 required (associative arrays)" >&2
+	exit 2
+fi
 export LC_ALL=C
 # Nothing from the PR tree may run: no LFS smudge, no prompts.
 export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
