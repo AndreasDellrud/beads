@@ -10,7 +10,8 @@
 #     endpoint), RBE_TLS_CERT, RBE_TLS_KEY (base64; RBE_TLS_CA optional):
 #     remote execution on rbe-west, instance "oss" (shared with gascity).
 #   fork PRs and rbe=off dispatches: local execution, slower but the same
-#     results. Same-repo runs are skipped while RBE_WEST_WORKERS is unset.
+#     results, for every job but bazel-embedded, which runs remotely only.
+#     Same-repo runs are skipped while RBE_WEST_WORKERS is unset.
 # workflow_dispatch with rbe=off simulates a fork run.
 #
 # Accepted risk (same model as gascity's bazel-test.yml): on push, merge_group
@@ -401,11 +402,15 @@ jobs:
   # does not (same race configuration, shared through the remote cache).
   bazel-embedded:
     name: Bazel / embedded Dolt tier (advisory)
-    # Same runner, rbe-west gate and skip rule as bazel-test.
+    # Remote execution only: unlike the other jobs, no fork PR or rbe=off
+    # run. Locally the tier is 27 race test processes (~7-10k test-seconds)
+    # on one GitHub-hosted runner, an hour or more per run on the pool whose
+    # job cap this track exists to relieve, and it proves nothing pr-risk.yml's
+    # embedded jobs (which do run for forks) do not. The runs-on expression is
+    # the shared one and always picks the Blacksmith runner under this if.
     runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    if: ${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}
-    # A fork (local) run executes all 27 race test processes on the runner.
-    timeout-minutes: 100
+    if: ${{ vars.RBE_WEST_WORKERS == 'true' && (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -422,7 +427,7 @@ jobs:
       # --build_event_json_file is a command option, so it goes after `test`.
       - name: bazel test //... --config=embedded
         id: test
-        timeout-minutes: 90
+        timeout-minutes: 50
         run: |
           set -o pipefail
           start=$(date +%s)

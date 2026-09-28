@@ -1507,6 +1507,12 @@ func TestBazelWorkflowIsAdvisory(t *testing.T) {
 	// RBE_WEST_WORKERS; until then same-repo runs are skipped and only fork
 	// PRs and rbe=off dispatches run, locally.
 	const wantIf = "${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}"
+	// Except bazel-embedded: remote only. Run locally, its 27 race test
+	// processes would take an hour or more of a GitHub-hosted runner per fork
+	// PR, for tests pr-risk.yml's embedded jobs already run there.
+	wantIfs := map[string]string{
+		bazelEmbedJobName: "${{ vars.RBE_WEST_WORKERS == 'true' && (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true }}",
+	}
 	gate := "(inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && "
 	wantSetupEnv := map[string]string{
 		"BAZEL_REMOTE_EXECUTOR": "${{ " + gate + "secrets.RBE_WEST_EXECUTOR || '' }}",
@@ -1519,8 +1525,12 @@ func TestBazelWorkflowIsAdvisory(t *testing.T) {
 		if job.RunsOn != wantRunsOn {
 			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantRunsOn)
 		}
-		if job.If != wantIf {
-			t.Errorf("%s if = %q, want %q", name, job.If, wantIf)
+		want, ok := wantIfs[name]
+		if !ok {
+			want = wantIf
+		}
+		if job.If != want {
+			t.Errorf("%s if = %q, want %q", name, job.If, want)
 		}
 		for _, step := range job.Steps {
 			if step.Uses == "./"+setupBazelActionDir && !reflect.DeepEqual(step.Env, wantSetupEnv) {
