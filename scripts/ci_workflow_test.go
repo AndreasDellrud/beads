@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1434,6 +1435,7 @@ const (
 	bazelJobName        = "bazel-test"
 	bazelPureJobName    = "bazel-pure"
 	bazelDockerJobName  = "bazel-docker"
+	bazelEmbedJobName   = "bazel-embedded"
 	setupBazelActionDir = ".github/actions/setup-bazel"
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
@@ -1449,7 +1451,7 @@ const (
 
 // bazel.yml's jobs: the --config=ci lane, and one job per pr.yml job a Bazel
 // config mirrors.
-var bazelJobNames = []string{bazelDockerJobName, bazelPureJobName, bazelJobName}
+var bazelJobNames = []string{bazelDockerJobName, bazelEmbedJobName, bazelPureJobName, bazelJobName}
 
 // The only triggers bazel.yml may have. pull_request_target (and
 // workflow_run) would run with secrets in the context of fork PRs.
@@ -1767,6 +1769,143 @@ func TestBazelDockerJobMirrorsContainerJobs(t *testing.T) {
 	for _, pkg := range []string{"internal/storage/domain/db", "internal/storage/uow", "internal/tracker", "cmd/bd/doctor/fix", "cmd/bd/protocol"} {
 		if !strings.Contains(readPolicyFile(t, root, pkg+"/BUILD.bazel"), `"requires-docker"`) {
 			t.Errorf("%s/BUILD.bazel has no requires-docker variant for the docker lane", pkg)
+		}
+	}
+}
+
+// bazelRuleBlock returns the text of the top-level rule named name in a
+// BUILD file, or "" if there is none.
+func bazelRuleBlock(build, name string) string {
+	i := strings.Index(build, "\n    name = \""+name+"\",\n")
+	if i < 0 {
+		return ""
+	}
+	start := strings.LastIndex(build[:i], "\n") + 1
+	end := strings.Index(build[i:], "\n)\n")
+	if end < 0 {
+		return build[start:]
+	}
+	return build[start : i+end+3]
+}
+
+// bazel-embedded replaces pr-risk.yml's embedded-Dolt tier: --config=embedded
+// runs the embedded variants race like the jobs' binaries, with the jobs'
+// parallelism; each shard variant runs its job's shard script with the job's
+// shard total, and the conformance variants pass the jobs' exact selectors.
+func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelEmbedJobName)
+	test := job.step(t, "bazel test //... --config=embedded")
+	if !strings.Contains(test.Run, "bazel test //... --config=embedded") || !strings.Contains(test.Run, "set -o pipefail") {
+		t.Errorf("embedded step does not run --config=embedded over //...:\n%s", test.Run)
+	}
+	if strings.Contains(test.Run, "--config=remote-exec") {
+		t.Errorf("embedded step selects remote-exec itself; setup-bazel's rc does that only when secrets are present")
+	}
+	assertTestStepKeepsExitStatus(t, test)
+
+	rc := map[string]bool{}
+	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
+		rc[strings.TrimSpace(line)] = true
+	}
+	for _, want := range []string{
+		"test:embedded --@rules_go//go/config:race",
+		"test:embedded --test_tag_filters=embedded",
+		// The jobs pass no -parallel: GOMAXPROCS on 4-vCPU ubuntu-latest.
+		"test:embedded --test_arg=-test.parallel=4",
+	} {
+		if !rc[want] {
+			t.Errorf(".bazelrc lacks %q", want)
+		}
+	}
+	for line := range rc {
+		if strings.HasPrefix(line, "test:embedded ") && (strings.Contains(line, "-test.short") || strings.Contains(line, "BEADS_TEST_SKIP")) {
+			t.Errorf(".bazelrc %q: the embedded jobs run without -short and BEADS_TEST_SKIP", line)
+		}
+	}
+
+	risk := readCIWorkflow(t, "pr-risk.yml")
+	build := risk.job(t, "build-embedded")
+	for step, want := range map[string]string{
+		"Build embedded bd binary":           "go build -tags gms_pure_go -race -o /tmp/bd-embedded-test ./cmd/bd/",
+		"Build embedded storage test binary": "go test -tags gms_pure_go -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/",
+		"Build embedded cmd test binary":     "go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/",
+	} {
+		if got := strings.TrimSpace(build.step(t, step).Run); got != want {
+			t.Errorf("pr-risk.yml %q = %q, want %q (the race build --config=embedded mirrors)", step, got, want)
+		}
+	}
+
+	sharded := []struct {
+		job, script, pkg, target string
+	}{
+		{"test-embedded-cmd", ".github/scripts/embedded-test-shard.sh", "cmd/bd", "bd_embedded_test"},
+		{"test-embedded-storage", ".github/scripts/embedded-storage-test-shard.sh", "internal/storage/embeddeddolt", "embeddeddolt_embedded_test"},
+	}
+	for _, c := range sharded {
+		j := risk.job(t, c.job)
+		shards := len(j.Strategy.Matrix.Shard)
+		step := j.step(t, "Test")
+		if want := "bash " + c.script + " ${{ matrix.shard }} " + strconv.Itoa(shards); strings.TrimSpace(step.Run) != want {
+			t.Errorf("pr-risk.yml %s runs %q, want %q", c.job, step.Run, want)
+		}
+		if step.Env["BEADS_TEST_EMBEDDED_DOLT"] != "1" {
+			t.Errorf("pr-risk.yml %s no longer sets BEADS_TEST_EMBEDDED_DOLT=1; update %s", c.job, c.target)
+		}
+		if os.Getenv("TEST_SRCDIR") != "" {
+			continue // scripts_test's runfiles hold no other package's BUILD
+		}
+		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), c.pkg+"/BUILD.bazel"), c.target)
+		for _, want := range []string{
+			`srcs = ["//tools/bazel:go_test_manifest_shard.sh"],`,
+			`"$(rootpath //:` + c.script + `)",`,
+			"shard_count = " + strconv.Itoa(shards) + ",",
+			`"BEADS_TEST_EMBEDDED_DOLT": "1"`,
+			`"embedded"`,
+		} {
+			if !strings.Contains(rule, want) {
+				t.Errorf("%s:%s does not contain %q (pr-risk.yml %s):\n%s", c.pkg, c.target, want, c.job, rule)
+			}
+		}
+	}
+	if os.Getenv("TEST_SRCDIR") == "" {
+		// The cmd jobs' subprocess bd is the race build, as //cmd/bd:bd is
+		// under --config=embedded (bd_for_tests never is).
+		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel"), "bd_embedded_test")
+		if !strings.Contains(rule, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)"`) {
+			t.Errorf("cmd/bd:bd_embedded_test must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", rule)
+		}
+	}
+
+	conformance := risk.job(t, "test-embedded-conformance")
+	if conformance.Env["BEADS_TEST_EMBEDDED_DOLT"] != "1" {
+		t.Error("pr-risk.yml test-embedded-conformance no longer sets BEADS_TEST_EMBEDDED_DOLT=1")
+	}
+	quoted := regexp.MustCompile(`(-test\.[a-z]+) '([^']*)'|(-test\.[a-z]+=\S+|-test\.v)`)
+	for partition, target := range map[string]string{"core": "embeddeddolt_conformance_core_test", "audit": "embeddeddolt_conformance_audit_test"} {
+		run := conformance.step(t, "Test "+partition+" conformance").Run
+		fields := strings.Fields(run)
+		if len(fields) == 0 || fields[0] != "/tmp/embeddeddolt-test" {
+			t.Fatalf("pr-risk.yml %s conformance no longer runs /tmp/embeddeddolt-test: %q", partition, run)
+		}
+		var want []string
+		for _, m := range quoted.FindAllStringSubmatch(run, -1) {
+			if m[1] != "" {
+				want = append(want, `"`+m[1]+"="+strings.ReplaceAll(m[2], "$", "$$")+`",`)
+			} else {
+				want = append(want, `"`+m[3]+`",`)
+			}
+		}
+		if len(want) < 4 {
+			t.Fatalf("parsed only %v from pr-risk.yml %s conformance %q", want, partition, run)
+		}
+		if os.Getenv("TEST_SRCDIR") != "" {
+			continue
+		}
+		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "internal/storage/embeddeddolt/BUILD.bazel"), target)
+		for _, w := range append(want, `"BEADS_TEST_EMBEDDED_DOLT": "1"`, `"embedded"`) {
+			if !strings.Contains(rule, w) {
+				t.Errorf("embeddeddolt:%s does not contain %q (pr-risk.yml %s conformance):\n%s", target, w, partition, rule)
+			}
 		}
 	}
 }

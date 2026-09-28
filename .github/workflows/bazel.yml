@@ -1,8 +1,9 @@
 # Bazel side-by-side lane (advisory). Runs `bazel test //... --config=ci`, the
 # PR Core-parity selection (race, -short, dolt skip, -requires-docker), on the
-# same commit as pr.yml's go test lanes. It is NOT in ci-gate's
-# CI_GATE_REQUIRED; promotion needs the equivalence record described in
-# tools/bazel/equivalence.py and a human decision.
+# same commit as pr.yml's go test lanes, plus one job per mirrored CI job
+# (pure-Go/js-wasm, docker lane, pr-risk.yml's embedded-Dolt tier). It is NOT
+# in ci-gate's CI_GATE_REQUIRED; promotion needs the equivalence record
+# described in tools/bazel/equivalence.py and a human decision.
 #
 # Execution mode, passed to .github/actions/setup-bazel:
 #   repo variable RBE_WEST_WORKERS=true plus secrets RBE_WEST_EXECUTOR (grpcs://
@@ -388,6 +389,57 @@ jobs:
           n="$(grep -c '<testcase ' bazel-testlogs/cmd/bd/bd_test/test.xml || true)"
           echo "pure cmd/bd subset: $n test cases"
           (( n > 0 ))
+
+  # pr-risk.yml's embedded-Dolt tier ("Test (Embedded Dolt Cmd N/20)",
+  # "Test (Embedded Dolt Storage N/5)", "Test (Embedded Dolt Conformance -
+  # core/audit)") as --config=embedded: the embedded-tagged variants of
+  # //cmd/bd:bd_test and //internal/storage/embeddeddolt:embeddeddolt_test.
+  # The shard variants run the jobs' own shard scripts and manifests, so Bazel
+  # shard k runs exactly the tests of job k. A job of its own rather than a
+  # second invocation in bazel-test: the tier's long race shards stay off
+  # bazel-test's critical path and budget, and it compiles nothing bazel-test
+  # does not (same race configuration, shared through the remote cache).
+  bazel-embedded:
+    name: Bazel / embedded Dolt tier (advisory)
+    # Same runner, rbe-west gate and skip rule as bazel-test.
+    runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}
+    # A fork (local) run executes all 27 race test processes on the runner.
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Bazel
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && 'oss' || '' }}
+
+      - name: bazel test //... --config=embedded
+        id: test
+        timeout-minutes: 90
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          bazel test //... --config=embedded 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=embedded: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Upload test logs
+        if: ${{ failure() && steps.test.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bazel-embedded-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
   # pr.yml's container-backed jobs, "Test (storage domain + uow)" and
   # "Contract corpus", as Bazel's docker lane: --config=docker runs the
