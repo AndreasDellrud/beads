@@ -204,8 +204,11 @@ sh_test(
         ":uow_test",
         "//cmd/bd:bd_for_tests",
     ],
+    # Pinned to the container backend (the docker lane is the A/B control);
+    # unpinned, bazel test would use the local dolt sql-server backend.
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "container",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
     },
     # ~12 min unsharded under -race on a loaded host (large allows 15).

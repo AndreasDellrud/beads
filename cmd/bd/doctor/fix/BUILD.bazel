@@ -114,7 +114,12 @@ sh_test(
     srcs = ["//tools/bazel:go_test_variant.sh"],
     args = ["$(rootpath :fix_test)"],
     data = [":fix_test"],
-    env = {"BEADS_FIX_REQUIRE_DOLT": "1"},
+    # Pinned to the container backend (the docker lane is the A/B control);
+    # unpinned, bazel test would use the local dolt sql-server backend.
+    env = {
+        "BEADS_FIX_REQUIRE_DOLT": "1",
+        "BEADS_TEST_DOLT_SERVER": "container",
+    },
     tags = [
         "no-remote-exec",
         "requires-docker",

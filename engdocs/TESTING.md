@@ -81,6 +81,21 @@ To skip an optional service explicitly, use the existing skip mechanism:
 BEADS_TEST_SKIP=dolt ./scripts/test.sh ./...
 ```
 
+Tests that need a Dolt SQL server get one from `internal/testutil`
+(`EnsureDoltContainerForTestMain`, `RequireDoltContainer`,
+`StartIsolatedDoltContainer[Handle]`, `NewContainerProvider`). Two backends
+sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
+
+- `container`: the `dolthub/dolt-sql-server` image through testcontainers
+  (needs docker and the pulled image). The default under plain `go test`.
+- `local`: a `dolt sql-server` started by the test process from the pinned
+  dolt CLI (`BEADS_TEST_DOLT_BINARY`, else `dolt` on `PATH`; it must be the
+  image's version). No docker. The default under `bazel test`.
+
+`BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
+failure (per test and in every `TestMain`) instead of a skip; lanes that
+exist to run the Dolt suites set it.
+
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
 do not inherit the developer's global hooks configuration.
