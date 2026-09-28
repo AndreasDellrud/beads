@@ -24,6 +24,7 @@ on:
       - 'cmd/bd/dolt*.go'
       - 'cmd/bd/*_proxied_server.go'
       - 'cmd/bd/backup*.go'
+      - 'cmd/bd/purge*.go'
       - 'cmd/bd/*managed_local*'
       - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/db_proxy_child.go'
@@ -51,6 +52,7 @@ on:
       - 'cmd/bd/dolt*.go'
       - 'cmd/bd/*_proxied_server.go'
       - 'cmd/bd/backup*.go'
+      - 'cmd/bd/purge*.go'
       - 'cmd/bd/*managed_local*'
       - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/db_proxy_child.go'
@@ -130,7 +132,8 @@ jobs:
             TestManagedLocalProxiedTrackerUOWConformance \
             TestManagedLocalProxiedBackupRoundTrip \
             TestManagedLocalProxiedAutoBackup \
-            TestManagedLocalProxiedBackupRestoreRefusedWhileAttached
+            TestManagedLocalProxiedBackupRestoreRefusedWhileAttached \
+            TestManagedLocalProxiedPurgeWispsPlaneRetention
           do
             if ! grep -qx "$test_name" <<<"$listed"; then
               echo "managed-local lifecycle test $test_name is missing; got: '$listed'" >&2
