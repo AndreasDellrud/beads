@@ -94,9 +94,12 @@ env:
 jobs:
   bazel-test:
     name: Bazel / test (advisory)
-    runs-on: ubuntu-latest
-    # Local execution (forks, rbe=off) builds and tests everything on the
-    # runner; remote runs finish in a few minutes.
+    # Remote-execution runs use the org's Blacksmith pool (the farm's edge
+    # admits it; GitHub-hosted runners are refused) and do not count against
+    # GitHub's concurrent-job cap. Fork PRs and rbe=off have no remote
+    # executor and build everything locally, so they get the larger
+    # GitHub-hosted runner.
+    runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6

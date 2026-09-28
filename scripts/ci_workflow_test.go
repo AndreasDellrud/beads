@@ -1472,6 +1472,11 @@ func TestBazelWorkflowIsAdvisory(t *testing.T) {
 		t.Errorf("%s jobs = %d, want only %q", bazelWorkflowName, len(workflow.Jobs), bazelJobName)
 	}
 	job := workflow.job(t, bazelJobName)
+	// The farm admits the Blacksmith pool only; forks (no secrets) and rbe=off
+	// build locally on the GitHub-hosted runner.
+	if want := "${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"; job.RunsOn != want {
+		t.Errorf("%s runs-on = %q, want %q", bazelJobName, job.RunsOn, want)
+	}
 	if job.ContinueOnError {
 		t.Errorf("%s continue-on-error hides failures; the lane is advisory by staying out of ci-gate", bazelJobName)
 	}

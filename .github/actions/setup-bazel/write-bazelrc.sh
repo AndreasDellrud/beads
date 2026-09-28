@@ -62,6 +62,12 @@ if [[ -n "$executor" ]]; then
 	hostport="${hostport%%/*}"
 	mask "$hostport"
 	mask "${hostport%:*}"
+	# Bazel's connection errors print the resolved address ("host/1.2.3.4:443").
+	if command -v getent >/dev/null 2>&1; then
+		while read -r addr _; do
+			mask "$addr"
+		done < <(getent ahosts "${hostport%:*}" 2>/dev/null | sort -u -k1,1)
+	fi
 fi
 
 cert="${RBE_TLS_CERT:-}"
