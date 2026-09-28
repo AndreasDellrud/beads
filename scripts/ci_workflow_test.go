@@ -1773,6 +1773,20 @@ func TestBazelDockerJobMirrorsContainerJobs(t *testing.T) {
 	}
 }
 
+// bazelAttrBlock returns the text of a list attribute (`    name = [` up to
+// its closing `    ],`) of a rule block from bazelRuleBlock, or "".
+func bazelAttrBlock(rule, name string) string {
+	i := strings.Index(rule, "\n    "+name+" = [")
+	if i < 0 {
+		return ""
+	}
+	end := strings.Index(rule[i:], "\n    ],\n")
+	if end < 0 {
+		return rule[i:]
+	}
+	return rule[i : i+end+7]
+}
+
 // bazelRuleBlock returns the text of the top-level rule named name in a
 // BUILD file, or "" if there is none.
 func bazelRuleBlock(build, name string) string {
@@ -1874,6 +1888,11 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		if !strings.Contains(rule, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)"`) {
 			t.Errorf("cmd/bd:bd_embedded_test must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", rule)
 		}
+		// The script's -test.timeout=20m equals Bazel's 1200s action limit,
+		// which kills without a goroutine dump; 19m lets Go's fire first.
+		if !strings.Contains(bazelAttrBlock(rule, "args"), `"-test.timeout=19m",`) {
+			t.Errorf("cmd/bd:bd_embedded_test must pass -test.timeout=19m after the script's own:\n%s", rule)
+		}
 	}
 
 	conformance := risk.job(t, "test-embedded-conformance")
@@ -1889,9 +1908,17 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		}
 		var want []string
 		for _, m := range quoted.FindAllStringSubmatch(run, -1) {
-			if m[1] != "" {
+			switch {
+			case m[1] != "":
 				want = append(want, `"`+m[1]+"="+strings.ReplaceAll(m[2], "$", "$$")+`",`)
-			} else {
+			case strings.HasPrefix(m[3], "-test.timeout="):
+				// Documented deviation: Bazel kills at 1200s without a
+				// goroutine dump, so the variant's Go timeout is 19m.
+				if m[3] != "-test.timeout=30m" {
+					t.Errorf("pr-risk.yml %s conformance timeout is now %q; revisit the variant's -test.timeout=19m", partition, m[3])
+				}
+				want = append(want, `"-test.timeout=19m",`)
+			default:
 				want = append(want, `"`+m[3]+`",`)
 			}
 		}

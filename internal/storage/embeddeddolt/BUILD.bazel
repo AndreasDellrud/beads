@@ -258,7 +258,9 @@ go_test(
 sh_test(
     name = "embeddeddolt_embedded_test",
     size = "large",
-    # The script gives the binary -test.timeout=15m per shard.
+    # The script gives the binary the job's -test.timeout=15m per shard; it
+    # fires (with a goroutine dump) well before Bazel's 1200s action limit
+    # (eternal under --config=embedded). The job itself also stops at 15m.
     timeout = "eternal",
     srcs = ["//tools/bazel:go_test_manifest_shard.sh"],
     args = [
@@ -278,7 +280,7 @@ sh_test(
 )
 
 # PR Risk's "Test (Embedded Dolt Conformance - core)" job: conformance.RunAll
-# except its Audit group, with the job's exact binary flags.
+# except its Audit group, with the job's binary flags but -test.timeout.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -286,13 +288,17 @@ sh_test(
 sh_test(
     name = "embeddeddolt_conformance_core_test",
     size = "large",
+    # Deviation from the job's -test.timeout=30m: Bazel ends the action at
+    # 1200s (eternal under --config=embedded), and rules_go's wrapper ignores
+    # that SIGTERM, so a hang would end as a bare TIMEOUT. 19m lets Go's own
+    # timeout fire first and dump every goroutine to test.log.
     timeout = "eternal",
     srcs = ["//tools/bazel:go_test_variant.sh"],
     args = [
         "$(rootpath :embeddeddolt_test)",
         "-test.v",
         "-test.count=1",
-        "-test.timeout=30m",
+        "-test.timeout=19m",
         "-test.run=^TestConformance$$",
         "-test.skip=^TestConformance$$/^Audit$$",
     ],
@@ -302,7 +308,7 @@ sh_test(
 )
 
 # PR Risk's "Test (Embedded Dolt Conformance - audit)" job: the Audit group of
-# conformance.RunAll alone.
+# conformance.RunAll alone, with the same -test.timeout deviation as core.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -310,13 +316,17 @@ sh_test(
 sh_test(
     name = "embeddeddolt_conformance_audit_test",
     size = "large",
+    # Deviation from the job's -test.timeout=30m: Bazel ends the action at
+    # 1200s (eternal under --config=embedded), and rules_go's wrapper ignores
+    # that SIGTERM, so a hang would end as a bare TIMEOUT. 19m lets Go's own
+    # timeout fire first and dump every goroutine to test.log.
     timeout = "eternal",
     srcs = ["//tools/bazel:go_test_variant.sh"],
     args = [
         "$(rootpath :embeddeddolt_test)",
         "-test.v",
         "-test.count=1",
-        "-test.timeout=30m",
+        "-test.timeout=19m",
         "-test.run=^TestConformance$$/^Audit$$",
     ],
     data = [":embeddeddolt_test"],
