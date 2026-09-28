@@ -899,3 +899,21 @@ func TestBazelrcPrcoreRequiresExcludePermission(t *testing.T) {
 	}
 	t.Fatalf(".bazelrc lacks %q", want)
 }
+
+// TestBazelrcPrcoreMatchesPRCoreParallel keeps test:prcore's -test.parallel
+// equal to pr-core.sh's -parallel default: without it Go uses GOMAXPROCS, the
+// executor's core count, and runs far more tests at once than PR Core does.
+func TestBazelrcPrcoreMatchesPRCoreParallel(t *testing.T) {
+	root := bazelPolicyRoot(t)
+	m := regexp.MustCompile(`(?m)^GO_TEST_PARALLEL="\$\{GO_TEST_PARALLEL:-(\d+)\}"$`).FindStringSubmatch(readPolicyFile(t, root, "scripts/ci/pr-core.sh"))
+	if m == nil {
+		t.Fatal("scripts/ci/pr-core.sh has no GO_TEST_PARALLEL default")
+	}
+	want := "test:prcore --test_arg=-test.parallel=" + m[1]
+	for _, line := range strings.Split(readPolicyFile(t, root, ".bazelrc"), "\n") {
+		if strings.TrimSpace(line) == want {
+			return
+		}
+	}
+	t.Fatalf(".bazelrc lacks %q (pr-core.sh runs go test -parallel %s)", want, m[1])
+}

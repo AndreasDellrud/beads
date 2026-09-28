@@ -26,6 +26,9 @@ test --test_env=BD_DISABLE_EVENT_FLUSH=1
 # -short, skips, tag filters); the environment comes from the wrapper above.
 test:prcore --@rules_go//go/config:race
 test:prcore --test_arg=-test.short
+# pr-core.sh's -parallel 4. Without it -test.parallel defaults to GOMAXPROCS,
+# the executor's core count (192 on a farm worker), not a runner's 4.
+test:prcore --test_arg=-test.parallel=4
 test:prcore --test_arg=-test.skip=^TestEmbedded
 test:prcore --test_env=BEADS_TEST_SKIP=dolt
 # As in pr.yml's PR Core step: a root or non-POSIX executor fails
