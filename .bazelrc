@@ -54,6 +54,26 @@ test:docker --test_tag_filters=requires-docker
 test:docker --build_tests_only
 test:docker --keep_going
 
+# Pure-Go lane: pr.yml's "Check pure-Go and js/wasm boundaries
+# (CGO_ENABLED=0)" job. CGO is off for every Go target (rules_go drops
+# cgo-constrained files like go build does; third_party/patches/
+# gozstd_nocgo.patch lets dolt's store/nbs, an unused but declared dep,
+# compile). bazel.yml builds bd and the job's pure test binaries and runs its
+# -short cmd/bd subset.
+build:pure --@rules_go//go/config:pure
+test:pure --test_arg=-test.short
+test:pure --test_env=GO_TEST_WRAP_TESTV=1
+test:pure --remote_download_regex=.*/test\.xml$
+
+# js/wasm hook boundary (same job): build for GOOS=js GOARCH=wasm. Bazel
+# cannot run the wasm test binary itself; bazel.yml runs it with the Go SDK's
+# go_js_wasm_exec (node), like `go test -exec`. The test toolchain needs an
+# exec platform matching the target platform, hence
+# --use_target_platform_for_tests (no test action runs under this config).
+build:js-wasm --platforms=@rules_go//go/toolchain:js_wasm
+build:js-wasm --use_target_platform_for_tests
+build:js-wasm --remote_download_outputs=toplevel
+
 # Remote execution against any REAPI-compatible service. Only generic tuning
 # lives here; the executor endpoint and TLS credentials are never committed.
 # Developers put them in a gitignored user.bazelrc or .bazelrc.local; CI writes

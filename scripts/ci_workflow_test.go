@@ -1170,6 +1170,7 @@ type ciWorkflowJob struct {
 	ContinueOnError bool                 `yaml:"continue-on-error"`
 	TimeoutMinutes  int                  `yaml:"timeout-minutes"`
 	Strategy        ciWorkflowStrategy   `yaml:"strategy"`
+	Env             map[string]string    `yaml:"env"`
 }
 
 type ciWorkflowStrategy struct {
@@ -1423,6 +1424,7 @@ func captureOne(t *testing.T, pattern, body, source string) string {
 const (
 	bazelWorkflowName   = "bazel.yml"
 	bazelJobName        = "bazel-test"
+	bazelPureJobName    = "bazel-pure"
 	setupBazelActionDir = ".github/actions/setup-bazel"
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
@@ -1435,6 +1437,10 @@ const (
 	bazelCacheSaveIf = "${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && " +
 		"steps.bazel.outcome == 'success' && steps.bazel.outputs.cache-hit != 'true' }}"
 )
+
+// bazel.yml's jobs: the --config=ci lane, and one job per pr.yml job a Bazel
+// config mirrors.
+var bazelJobNames = []string{bazelPureJobName, bazelJobName}
 
 // The only triggers bazel.yml may have. pull_request_target (and
 // workflow_run) would run with secrets in the context of fork PRs.
@@ -1468,17 +1474,25 @@ func readSetupBazelAction(t *testing.T) ciCompositeAction {
 // it: no ci-gate may need it or list it in CI_GATE_REQUIRED.
 func TestBazelWorkflowIsAdvisory(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
-	if len(workflow.Jobs) != 1 {
-		t.Errorf("%s jobs = %d, want only %q", bazelWorkflowName, len(workflow.Jobs), bazelJobName)
+	var names []string
+	for name, job := range workflow.Jobs {
+		names = append(names, name)
+		if job.ContinueOnError {
+			t.Errorf("%s continue-on-error hides failures; the lane is advisory by staying out of ci-gate", name)
+		}
+		if job.TimeoutMinutes == 0 {
+			t.Errorf("%s has no timeout-minutes", name)
+		}
+	}
+	sort.Strings(names)
+	if !reflect.DeepEqual(names, bazelJobNames) {
+		t.Errorf("%s jobs = %v, want %v", bazelWorkflowName, names, bazelJobNames)
 	}
 	job := workflow.job(t, bazelJobName)
 	// The farm admits the Blacksmith pool only; forks (no secrets) and rbe=off
 	// build locally on the GitHub-hosted runner.
 	if want := "${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"; job.RunsOn != want {
 		t.Errorf("%s runs-on = %q, want %q", bazelJobName, job.RunsOn, want)
-	}
-	if job.ContinueOnError {
-		t.Errorf("%s continue-on-error hides failures; the lane is advisory by staying out of ci-gate", bazelJobName)
 	}
 	for _, name := range []string{"pr.yml", "pr-risk.yml"} {
 		for jobName, j := range readCIWorkflow(t, name).Jobs {
@@ -1504,10 +1518,13 @@ func TestBazelWorkflowIsAdvisory(t *testing.T) {
 // here too (restore everywhere, save only where the topology says).
 func TestBazelWorkflowActionsArePinned(t *testing.T) {
 	steps := map[string][]ciWorkflowStep{
-		bazelWorkflowName:                   readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName).Steps,
 		setupBazelActionDir + "/action.yml": readSetupBazelAction(t).Runs.Steps,
 	}
+	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		steps[bazelWorkflowName+" "+name] = job.Steps
+	}
 	want := map[string]string{
+		setupNodeActionFamily:       setupNodeSHA,
 		"actions/checkout":          checkoutSHA,
 		setupGoActionFamily:         setupGoSHA,
 		cacheRestoreActionFamily:    cacheSHA,
@@ -1538,8 +1555,8 @@ func TestBazelWorkflowActionsArePinned(t *testing.T) {
 			if family == setupGoActionFamily && step.With["cache"] != "false" {
 				t.Errorf("%s setup-go cache = %q, want false", file, step.With["cache"])
 			}
-			if family == cacheSaveActionFamily && file != bazelWorkflowName {
-				t.Errorf("%s step %q saves a cache; only %s's push-to-main step may", file, step.Name, bazelWorkflowName)
+			if family == cacheSaveActionFamily && file != bazelWorkflowName+" "+bazelJobName {
+				t.Errorf("%s step %q saves a cache; only %s's push-to-main step may", file, step.Name, bazelJobName)
 			}
 		}
 		for _, step := range list {
@@ -1669,6 +1686,71 @@ func TestBazelWorkflowPublishesBuildArtifacts(t *testing.T) {
 	// test:ci must download the binary under --remote_download_minimal.
 	if !strings.Contains(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "test:ci --remote_download_regex=.*/bin/cmd/bd/bd_for_tests/bd$") {
 		t.Error(".bazelrc test:ci does not download //cmd/bd:bd_for_tests")
+	}
+}
+
+// bazel-pure replaces pr.yml's check-cmd-bd-puregeo-tests job: the same pure
+// cmd/bd test selector, the same pure build set, and the js/wasm hook test
+// under the same exact-count guard.
+func TestBazelPureJobMirrorsPureGoJob(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml").job(t, "check-cmd-bd-puregeo-tests")
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelPureJobName)
+
+	prSubset := pr.step(t, "Run pure-Go cmd/bd test subset (CGO_ENABLED=0)").Run
+	m := regexp.MustCompile(`-run '([^']+)' \./cmd/bd`).FindStringSubmatch(prSubset)
+	if m == nil {
+		t.Fatalf("cannot find the -run selector in pr.yml's pure subset step:\n%s", prSubset)
+	}
+	if job.Env["PURE_CMD_BD_TESTS"] != m[1] || !strings.Contains(prSubset, "-short") {
+		t.Errorf("%s PURE_CMD_BD_TESTS = %q, want pr.yml's -short -run selector %q", bazelPureJobName, job.Env["PURE_CMD_BD_TESTS"], m[1])
+	}
+	run := job.step(t, "Run pure-Go cmd/bd test subset (--config=pure)").Run
+	for _, required := range []string{"bazel test --config=pure //cmd/bd:bd_test", `"--test_arg=-test.run=$PURE_CMD_BD_TESTS"`, "(( n > 0 ))"} {
+		if !strings.Contains(run, required) {
+			t.Errorf("pure subset step does not contain %q:\n%s", required, run)
+		}
+	}
+	if !strings.Contains(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "test:pure --test_arg=-test.short") {
+		t.Error(".bazelrc test:pure does not pass -test.short like the pr.yml subset")
+	}
+
+	build := job.step(t, "Build cmd/bd and pure-Go test binaries (--config=pure)").Run
+	prBuild := pr.step(t, "Build cmd/bd (CGO_ENABLED=0, gms_pure_go)").Run + pr.step(t, "Compile pure-Go test binaries (CGO_ENABLED=0, gms_pure_go)").Run
+	for pkg, target := range map[string]string{
+		"go build -tags gms_pure_go -o /tmp/bd-puregeo ./cmd/bd":               "//cmd/bd:bd",
+		"-o /tmp/bd-cmd-puregeo-test ./cmd/bd":                                 "//cmd/bd:bd_test",
+		"-o /tmp/bd-embeddeddolt-puregeo-test ./internal/storage/embeddeddolt": "//internal/storage/embeddeddolt:embeddeddolt_test",
+		"-o /tmp/bd-tracker-puregeo-test ./internal/tracker":                   "//internal/tracker:tracker_test",
+	} {
+		if !strings.Contains(prBuild, pkg) {
+			t.Errorf("pr.yml pure build steps no longer contain %q; update %s to match", pkg, bazelPureJobName)
+		}
+		if !strings.Contains(build, target) || !strings.Contains(build, "bazel build --config=pure") {
+			t.Errorf("pure build step does not build %s:\n%s", target, build)
+		}
+	}
+
+	prWasm := pr.step(t, "Run js/wasm hook boundary").Run
+	wasm := job.step(t, "Run js/wasm hook boundary").Run
+	for _, required := range []string{"bazel build --config=js-wasm //internal/hooks:hooks_test", "go_js_wasm_exec"} {
+		if !strings.Contains(wasm, required) {
+			t.Errorf("js/wasm step does not contain %q:\n%s", required, wasm)
+		}
+	}
+	// The selector and everything from the count guard on are pr.yml's.
+	const selector = "run '^TestRunHookReportsUnsupportedExecution$'"
+	if !strings.Contains(prWasm, " -"+selector) || !strings.Contains(wasm, " -test."+selector) {
+		t.Errorf("js/wasm selector drifted from pr.yml's %q", selector)
+	}
+	guard := func(script string) string {
+		i := strings.Index(script, "run_count=0")
+		if i < 0 {
+			return ""
+		}
+		return script[i:]
+	}
+	if guard(wasm) == "" || guard(wasm) != guard(prWasm) {
+		t.Errorf("js/wasm count guard differs from pr.yml's:\n--- pr.yml\n%s\n--- %s\n%s", guard(prWasm), bazelPureJobName, guard(wasm))
 	}
 }
 
@@ -1825,13 +1907,17 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 	}
 
 	setupSteps := map[string]bool{}
-	for i, step := range readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName).Steps {
-		if step.Uses == "./"+setupBazelActionDir {
-			setupSteps[fmt.Sprintf(".jobs.%s.steps[%d].env.", bazelJobName, i)] = true
+	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		n := 0
+		for i, step := range job.Steps {
+			if step.Uses == "./"+setupBazelActionDir {
+				setupSteps[fmt.Sprintf(".jobs.%s.steps[%d].env.", name, i)] = true
+				n++
+			}
 		}
-	}
-	if len(setupSteps) != 1 {
-		t.Errorf("%s has %d setup-bazel steps, want 1", bazelWorkflowName, len(setupSteps))
+		if n != 1 {
+			t.Errorf("%s job %s has %d setup-bazel steps, want 1", bazelWorkflowName, name, n)
+		}
 	}
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
 	walkYAML(root, "", func(path string, key bool, value string) {
