@@ -676,7 +676,7 @@ var allowedBazelTestTags = map[string]string{
 	"no-remote-cache": "result depends on the host, so it is neither read from nor uploaded to the remote cache",
 	"requires-docker": "needs a docker daemon; excluded from --config=prcore/ci, run by --config=docker",
 	"embedded":        "embedded-Dolt tier variant; its own config",
-	"manual":          "repro/bench harness; never part of //...",
+	"manual":          "never part of //...: a repro/bench harness, or a build input only another target needs",
 }
 
 // bazelTagsRequiring maps tags whose targets depend on the host to the tags
