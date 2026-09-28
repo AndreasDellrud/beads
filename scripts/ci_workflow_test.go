@@ -1773,6 +1773,9 @@ func TestBazelDockerJobMirrorsContainerJobs(t *testing.T) {
 	}
 }
 
+// The default shard manifest of a PR Risk shard script.
+var shardManifestDefault = regexp.MustCompile(`\$\{BEADS_TEST_SHARD_MANIFEST:-([^}]+)\}`)
+
 // bazelAttrBlock returns the text of a list attribute (`    name = [` up to
 // its closing `    ],`) of a rule block from bazelRuleBlock, or "".
 func bazelAttrBlock(rule, name string) string {
@@ -1816,6 +1819,17 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		t.Errorf("embedded step selects remote-exec itself; setup-bazel's rc does that only when secrets are present")
 	}
 	assertTestStepKeepsExitStatus(t, test)
+	// A shard with no tests assigned, or a selector that matches nothing,
+	// exits 0; the job fails on any target or shard whose test.xml lists none.
+	if !strings.Contains(test.Run, `--build_event_json_file="$RUNNER_TEMP/bazel-bep.json"`) {
+		t.Errorf("embedded step writes no BEP for the test-count check:\n%s", test.Run)
+	}
+	count := job.step(t, "Every target and shard ran tests")
+	if strings.TrimSpace(count.Run) != `python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"` ||
+		count.If != "${{ always() && steps.test.outcome != 'skipped' }}" ||
+		(count.ContinueOnError != nil && count.ContinueOnError != false) {
+		t.Errorf("test-count step: if=%q continue-on-error=%v run=%q", count.If, count.ContinueOnError, count.Run)
+	}
 
 	rc := map[string]bool{}
 	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
@@ -1868,7 +1882,8 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		if os.Getenv("TEST_SRCDIR") != "" {
 			continue // scripts_test's runfiles hold no other package's BUILD
 		}
-		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), c.pkg+"/BUILD.bazel"), c.target)
+		root := sourceRepoRoot(t)
+		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
 		for _, want := range []string{
 			`srcs = ["//tools/bazel:go_test_manifest_shard.sh"],`,
 			`"$(rootpath //:` + c.script + `)",`,
@@ -1878,6 +1893,19 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		} {
 			if !strings.Contains(rule, want) {
 				t.Errorf("%s:%s does not contain %q (pr-risk.yml %s):\n%s", c.pkg, c.target, want, c.job, rule)
+			}
+		}
+		// The script and its manifest must be in the runfiles: without the
+		// manifest the script silently falls back to hash assignment, so
+		// every shard still passes but no longer runs its job's tests.
+		m := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
+		if m == nil {
+			t.Fatalf("%s has no ${BEADS_TEST_SHARD_MANIFEST:-...} default manifest", c.script)
+		}
+		data := bazelAttrBlock(rule, "data")
+		for _, file := range []string{c.script, m[1]} {
+			if !strings.Contains(data, `"//:`+file+`",`) {
+				t.Errorf("%s:%s data lacks //:%s:\n%s", c.pkg, c.target, file, data)
 			}
 		}
 	}
