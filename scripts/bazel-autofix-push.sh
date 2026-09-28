@@ -11,9 +11,12 @@
 #     regex, no hidden or `..` segments, nothing under third_party/);
 #   * any mode line, symlink, rename/copy or binary hunk is refused, so only
 #     regular 100644 files are created, edited or deleted;
-#   * `git apply --index` supplies the underlying escape guards (rejects `..`
-#     paths, absolute paths, and writes through in-patch symlinks);
-#   * the staged result is re-checked against the same allowlist.
+#   * the patch is applied to an index only (`git read-tree` + `git apply
+#     --cached` in a bare clone): the PR tree is never written to disk, and
+#     git's own guards reject `..`/absolute paths and in-patch symlinks;
+#   * the staged result is re-checked against the same allowlist;
+#   * only files in packages the PR itself changed are pushed, so drift that
+#     main introduced is never pushed onto an unrelated PR.
 # A hostile patch can therefore at most rewrite Bazel build files on its own
 # PR branch, which its author could push there anyway.
 #
@@ -34,8 +37,9 @@
 #   RUN_URL      html url of that run (for commit/comment provenance)
 #   GH_TOKEN     token for gh api calls (PR lookup, comments) - needs the
 #                workflow's pull-requests:write; never the PAT
-#   PUSH_TOKEN   token for the git push only (optional; defaults to GH_TOKEN),
-#                so the shared DOCS_AUTOFIX_TOKEN needs contents:write only
+#   PUSH_TOKEN   token for git fetch/push only (optional; defaults to
+#                GH_TOKEN), so the shared DOCS_AUTOFIX_TOKEN needs
+#                contents:write only
 #   AUTOFIX_TOKEN_KIND  "pat" when a dedicated push token is in use, "default"
 #                       for the workflow's GITHUB_TOKEN (retrigger caveat)
 #
@@ -44,9 +48,14 @@
 
 set -euo pipefail
 export LC_ALL=C
+# Nothing from the PR tree may run: no LFS smudge, no prompts.
+export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
 
 COMMENT_MARKER="<!-- bazel-sync-autofix -->"
 AUTOFIX_SUBJECT="build(bazel): auto-sync BUILD files"
+# Comments are only ever edited when this account wrote them: anyone can post
+# a comment that starts with the marker.
+COMMENT_AUTHOR="github-actions[bot]"
 
 # Files `make bazel-sync` may write and this bot may push - keep identical to
 # scripts/ci/bazel-sync-patch.sh (scripts/ci_workflow_test.go checks). Every
@@ -62,13 +71,20 @@ path_allowed() {
     [[ "$1" =~ $BUILD_FILE_RE ]]
 }
 
-# validate_patch FILE: refuse anything but plain text edits to allowlisted
-# regular files.
+# Every git call: no hooks, whatever config a clone might carry.
+git_() {
+    git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
+
+# validate_patch FILE: refuse anything but plain text edits to regular files
+# that path_allowed accepts. Shared verbatim with docs-autofix-push.sh
+# (scripts/ci_workflow_test.go checks).
 validate_patch() {
-    local file="$1" path bad=""
-    # Only 100644 files: no symlink (120000), executable, gitlink or bare mode
-    # change; no rename/copy (which would name a second path); no binary hunk.
-    if grep -qE '^(old mode|new mode|similarity index|dissimilarity index|rename (from|to)|copy (from|to)|GIT binary patch|Binary files )' "$file"; then
+    local file="$1" line path names bad="" count=0
+    # No mode change, symlink, rename or copy, binary hunk. ANY line starting
+    # "rename " or "copy " is refused: git apply also accepts the legacy
+    # "rename old"/"rename new" headers, which name a second path.
+    if grep -qE '^(old mode|new mode|similarity index|dissimilarity index|rename |copy |GIT binary patch|Binary files )' "$file"; then
         echo "REFUSED: patch contains a mode change, rename/copy or binary hunk."
         return 1
     fi
@@ -76,28 +92,77 @@ validate_patch() {
         echo "REFUSED: patch creates or deletes a non-regular (symlink/executable/submodule) file."
         return 1
     fi
-    # "index a..b MODE" appears on edits of an existing file.
-    if grep -E '^index [0-9a-f]+\.\.[0-9a-f]+ ' "$file" | grep -qvE ' 100644$'; then
-        echo "REFUSED: patch edits a file whose mode is not 100644."
+    # Every index line, whatever its ids look like, must be "index A..B" or
+    # "index A..B 100644"; a malformed id cannot hide a mode from this check.
+    if grep -E '^index ' "$file" | grep -qvE '^index [0-9a-f]+\.\.[0-9a-f]+( 100644)?$'; then
+        echo "REFUSED: patch has an index line that is not a regular 100644 file."
         return 1
     fi
-    # --numstat prints "added<TAB>deleted<TAB>path"; unusual names come back
-    # quoted and renames as "old => new", both of which the allowlist rejects.
-    local numstat
-    if ! numstat="$(git apply --numstat "$file")"; then
+    # --summary is git's own view of creations, deletions, renames, copies,
+    # mode changes and rewrites; only 100644 creations/deletions may appear.
+    if ! names="$(git apply --summary "$file")"; then
         echo "REFUSED: git apply cannot parse the patch."
         return 1
     fi
-    if [ -z "$numstat" ]; then
+    while IFS= read -r line; do
+        case "$line" in
+            "") continue ;;
+            " create mode 100644 "*) path="${line# create mode 100644 }" ;;
+            " delete mode 100644 "*) path="${line# delete mode 100644 }" ;;
+            *)
+                echo "REFUSED: patch summary has an unexpected entry: $line"
+                return 1
+                ;;
+        esac
+        path_allowed "$path" || bad="${bad}  ${path}\n"
+    done <<<"$names"
+    # --numstat -z prints "added<TAB>deleted<TAB>NAME<NUL>" with NAME raw
+    # (never quoted) and, for a rename, only the NEW name - hence the header
+    # and --summary checks above. The last read field keeps any tab/newline.
+    names="$(mktemp)"
+    if ! git apply --numstat -z "$file" >"$names"; then
+        rm -f "$names"
+        echo "REFUSED: git apply cannot parse the patch."
+        return 1
+    fi
+    while IFS=$'\t' read -r -d '' _ _ path; do
+        count=$((count + 1))
+        path_allowed "$path" || bad="${bad}  ${path}\n"
+    done <"$names"
+    rm -f "$names"
+    if [ "$count" -eq 0 ]; then
         echo "REFUSED: patch names no files."
         return 1
     fi
-    while IFS=$'\t' read -r _ _ path; do
-        [ -n "$path" ] || continue
-        path_allowed "$path" || bad="${bad}  ${path}\n"
-    done <<<"$numstat"
     if [ -n "$bad" ]; then
-        printf 'REFUSED: patch touches paths outside the Bazel build-file allowlist:\n%b' "$bad"
+        printf 'REFUSED: patch touches paths outside the allowlist:\n%b' "$bad"
+        return 1
+    fi
+}
+
+# check_staged COMMIT: the index (after git apply --cached) differs from
+# COMMIT only by regular-file adds/edits/deletes of allowlisted paths. Sets
+# STAGED_PATHS. Shared verbatim with docs-autofix-push.sh.
+check_staged() {
+    local base="$1" meta path raw src_mode dst_mode status err=""
+    STAGED_PATHS=()
+    raw="$(mktemp)"
+    # -z --raw records: ":SRCMODE DSTMODE SRCSHA DSTSHA STATUS<NUL>PATH<NUL>".
+    git_ diff-index --cached --raw --no-renames -z "$base" >"$raw"
+    while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+        read -r src_mode dst_mode _ _ status <<<"$meta"
+        case "$src_mode $dst_mode $status" in
+            ":100644 100644 M" | ":000000 100644 A" | ":100644 000000 D") ;;
+            *) err="REFUSED: staged change is not a regular-file edit: $meta $path" && break ;;
+        esac
+        if ! path_allowed "$path"; then
+            err="REFUSED: staged change outside the allowlist: $meta $path" && break
+        fi
+        STAGED_PATHS+=("$path")
+    done <"$raw"
+    rm -f -- "$raw"
+    if [ -n "$err" ]; then
+        echo "$err"
         return 1
     fi
 }
@@ -123,6 +188,10 @@ if [ ! -s "$PATCH_FILE" ]; then
     exit 0
 fi
 PATCH_FILE="$(readlink -f "$PATCH_FILE")"
+if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "HEAD_SHA is not a commit id: $HEAD_SHA" >&2
+    exit 1
+fi
 
 # --- Validate the untrusted patch --------------------------------------------
 
@@ -140,16 +209,17 @@ fi
 # --- Resolve the PR and confirm the patch is still current -------------------
 
 # List-and-filter client side: branch names with URL metacharacters would
-# corrupt a ?head= query string, and jq --arg needs no encoding.
+# corrupt a ?head= query string, and jq --arg needs no encoding. The PR must
+# target this repository.
 PULLS_JSON="$(gh api --paginate "repos/$BASE_REPO/pulls?state=open&per_page=100")"
-PR_MATCH="$(printf '%s' "$PULLS_JSON" | jq -r -s --arg repo "$HEAD_REPO" --arg branch "$HEAD_BRANCH" \
-    'add | [ .[] | select(.head.ref == $branch and (.head.repo.full_name // "") == $repo) ]
-     | .[0] | if . == null then "" else "\(.number) \(.head.sha)" end')"
-PR_NUMBER="${PR_MATCH%% *}"
-PR_HEAD_NOW="${PR_MATCH##* }"
+PR_MATCH="$(printf '%s' "$PULLS_JSON" | jq -r -s --arg repo "$HEAD_REPO" --arg branch "$HEAD_BRANCH" --arg base "$BASE_REPO" \
+    'add | [ .[] | select(.head.ref == $branch and (.head.repo.full_name // "") == $repo
+                          and (.base.repo.full_name // "") == $base) ]
+     | .[0] | if . == null then "" else "\(.number)\t\(.head.sha)\t\(.base.ref)" end')"
+IFS=$'\t' read -r PR_NUMBER PR_HEAD_NOW PR_BASE_REF <<<"$PR_MATCH"
 
 if [ -z "$PR_NUMBER" ]; then
-    echo "No open PR for $HEAD_REPO:$HEAD_BRANCH; nothing to do."
+    echo "No open PR for $HEAD_REPO:$HEAD_BRANCH into $BASE_REPO; nothing to do."
     exit 0
 fi
 if [ "$PR_HEAD_NOW" != "$HEAD_SHA" ]; then
@@ -166,13 +236,15 @@ case "$HEAD_MSG" in
     *) NONCONVERGENT=0 ;;
 esac
 
+# post_or_update_comment BODY_FILE: edit our own marker comment, else post.
+# Shared verbatim with docs-autofix-push.sh.
 post_or_update_comment() {
     local body_file="$1"
     # Capture fully before taking the first id: head -1 on a live --paginate
     # stream SIGPIPEs gh under pipefail.
     local ids existing
     ids="$(gh api --paginate "repos/$BASE_REPO/issues/$PR_NUMBER/comments" \
-        --jq ".[] | select(.body | startswith(\"$COMMENT_MARKER\")) | .id")"
+        --jq ".[] | select(.user.login == \"$COMMENT_AUTHOR\" and (.body | startswith(\"$COMMENT_MARKER\"))) | .id")"
     existing="$(printf '%s\n' "$ids" | head -1)"
     if [ -n "$existing" ]; then
         gh api --method PATCH "repos/$BASE_REPO/issues/comments/$existing" \
@@ -183,6 +255,22 @@ post_or_update_comment() {
             -F body=@"$body_file" >/dev/null
         echo "Posted autofix comment on PR #$PR_NUMBER."
     fi
+}
+
+# head_branch_protected: true unless GitHub itself says HEAD_BRANCH has no
+# branch protection and no ruleset; an API error counts as protected. The name
+# list is a floor, not the check. Shared verbatim with docs-autofix-push.sh.
+head_branch_protected() {
+    local enc protected rules
+    case "$HEAD_BRANCH" in
+        main | release/* | gh-readonly-queue/*) return 0 ;;
+    esac
+    enc="$(jq -rn --arg b "$HEAD_BRANCH" '$b | @uri')"
+    protected="$(gh api "repos/$BASE_REPO/branches/$enc" --jq '.protected' 2>/dev/null)" || return 0
+    [ "$protected" = "false" ] || return 0
+    rules="$(gh api "repos/$BASE_REPO/rules/branches/$enc" --jq 'length' 2>/dev/null)" || return 0
+    [ "$rules" = "0" ] || return 0
+    return 1
 }
 
 comment_fallback() {
@@ -223,13 +311,12 @@ if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
     exit 0
 fi
 
-# Never push to a long-lived branch, even if a PR happens to use one as head.
-case "$HEAD_BRANCH" in
-    main | release/* | gh-readonly-queue/*)
-        comment_fallback "the head branch $HEAD_BRANCH is protected from bot pushes"
-        exit 0
-        ;;
-esac
+# Never push to a protected branch or one under a ruleset, even if a PR uses
+# it as head: the push token may be able to bypass what the author cannot.
+if head_branch_protected; then
+    comment_fallback "the head branch $HEAD_BRANCH is protected from bot pushes"
+    exit 0
+fi
 
 # --- Same-repo PRs: push the sync commit --------------------------------------
 
@@ -239,52 +326,127 @@ AUTH_CONFIG="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+# Bare clone and a private index: the PR tree is never checked out, so no
+# symlink, .gitattributes or hook from it touches the disk.
+export GIT_INDEX_FILE="$WORK/index"
 
-git -c "$AUTH_CONFIG" clone --quiet --no-checkout --filter=blob:none \
-    "https://github.com/${BASE_REPO}.git" "$WORK/repo"
-cd "$WORK/repo"
-git -c "$AUTH_CONFIG" fetch --quiet origin "$HEAD_BRANCH"
-git checkout --quiet "$HEAD_SHA" 2>/dev/null || {
+git_ -c "$AUTH_CONFIG" clone --quiet --bare --filter=blob:none \
+    "https://github.com/${BASE_REPO}.git" "$WORK/repo.git"
+cd "$WORK/repo.git"
+git_ -c "$AUTH_CONFIG" fetch --quiet origin \
+    "+refs/heads/$HEAD_BRANCH:refs/autofix/head" "+refs/heads/$PR_BASE_REF:refs/autofix/base"
+if ! git_ cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
     echo "Head $HEAD_SHA no longer reachable on $BASE_REPO/$HEAD_BRANCH; skipping."
-    exit 0
-}
-
-if ! git apply --index "$PATCH_FILE" 2>/dev/null; then
-    cd - >/dev/null
-    comment_fallback "the sync patch no longer applies cleanly to the PR head"
     exit 0
 fi
 
-# Belt and braces: what actually got staged must pass the same rules.
-# --raw lines: ":SRCMODE DSTMODE SRCSHA DSTSHA STATUS<TAB>PATH".
-while IFS=$'\t' read -r meta path; do
-    read -r src_mode dst_mode _ <<<"$meta"
-    case "$src_mode $dst_mode" in
-        ":100644 100644" | ":000000 100644" | ":100644 000000") ;;
-        *) path="" ;;
+# Attribute the patch to the PR: bazel.yml builds the PR MERGE commit, so the
+# patch also carries any drift main has. Only files the PR's own changes
+# (merge-base..head) can explain are pushed:
+#   * D/BUILD.bazel when the PR changed a file whose nearest package (the
+#     closest directory with a BUILD.bazel) is D;
+#   * MODULE.bazel / MODULE.bazel.lock when it changed go.mod, go.sum or either
+#     MODULE file;
+#   * everything when it changed the sync tooling (tools/bazel/, root BUILD.bazel).
+MERGE_BASE="$(git_ merge-base refs/autofix/base "$HEAD_SHA" 2>/dev/null || true)"
+if [ -z "$MERGE_BASE" ]; then
+    cd / && comment_fallback "CI could not tell which files this PR changed"
+    exit 0
+fi
+declare -A PKG_DIRS=() PR_PKGS=()
+PR_ALL=0 PR_MODULE=0
+while IFS= read -r -d '' path; do
+    case "$path" in
+        BUILD.bazel) PKG_DIRS[.]=1 ;;
+        */BUILD.bazel) PKG_DIRS["${path%/BUILD.bazel}"]=1 ;;
     esac
-    if ! path_allowed "$path"; then
-        echo "REFUSED: staged change outside the allowlist: $meta $path"
+done < <(git_ ls-tree -r -z --name-only "$HEAD_SHA")
+PATCH_PATHS=()
+while IFS=$'\t' read -r -d '' _ _ path; do
+    PATCH_PATHS+=("$path")
+    case "$path" in */BUILD.bazel) PKG_DIRS["${path%/BUILD.bazel}"]=1 ;; esac
+done < <(git apply --numstat -z "$PATCH_FILE")
+PKG_DIRS[.]=1
+while IFS= read -r -d '' path; do
+    case "$path" in
+        go.mod | go.sum | MODULE.bazel | MODULE.bazel.lock) PR_MODULE=1 ;;
+        BUILD.bazel | tools/bazel/*) PR_ALL=1 ;;
+    esac
+    dir="$(dirname -- "$path")"
+    while [ -z "${PKG_DIRS[$dir]:-}" ]; do dir="$(dirname -- "$dir")"; done
+    PR_PKGS["$dir"]=1
+done < <(git_ diff --name-only --no-renames -z "$MERGE_BASE" "$HEAD_SHA")
+
+OURS=() NOT_OURS=()
+for path in "${PATCH_PATHS[@]}"; do
+    case "$path" in
+        MODULE.bazel | MODULE.bazel.lock) pkg="" ours=$PR_MODULE ;;
+        BUILD.bazel) pkg=. ours=0 ;;
+        *) pkg="${path%/BUILD.bazel}" ours=0 ;;
+    esac
+    if [ "$PR_ALL" = 1 ] || [ "$ours" = 1 ] || { [ -n "$pkg" ] && [ -n "${PR_PKGS[$pkg]:-}" ]; }; then
+        OURS+=("$path")
+    else
+        NOT_OURS+=("$path")
+    fi
+done
+NOT_OURS_NOTE=""
+if [ "${#NOT_OURS[@]}" -gt 0 ]; then
+    echo "Not pushed (outside what the PR changed, likely base-branch drift):"
+    printf '  %s\n' "${NOT_OURS[@]}"
+    NOT_OURS_NOTE="Not pushed, because this PR did not change those packages (likely drift on the base branch; rebasing after it is fixed clears it): $(printf '%s ' "${NOT_OURS[@]}")"
+fi
+if [ "${#OURS[@]}" -eq 0 ]; then
+    cd / && comment_fallback "the drift is in files this PR did not change - most likely the base branch is out of sync, so no fix was pushed"
+    exit 0
+fi
+
+INCLUDES=()
+for path in "${OURS[@]}"; do INCLUDES+=("--include=$path"); done
+git_ read-tree "$HEAD_SHA"
+if ! git_ -c "$AUTH_CONFIG" apply --cached "${INCLUDES[@]}" "$PATCH_FILE" 2>/dev/null; then
+    cd / && comment_fallback "the sync patch no longer applies cleanly to the PR head"
+    exit 0
+fi
+
+# Belt and braces: what actually got staged must pass the same rules, and
+# only include the files attributed to the PR.
+check_staged "$HEAD_SHA"
+declare -A OURS_SET=()
+for path in "${OURS[@]}"; do OURS_SET["$path"]=1; done
+for path in "${STAGED_PATHS[@]}"; do
+    if [ -z "${OURS_SET[$path]:-}" ]; then
+        echo "REFUSED: staged change not attributed to the PR: $path"
         exit 1
     fi
-done < <(git -c core.quotePath=true diff --cached --raw --no-renames)
+done
+if [ "${#STAGED_PATHS[@]}" -eq 0 ]; then
+    echo "Patch changes nothing on $HEAD_SHA; nothing to push."
+    exit 0
+fi
 
-git -c user.name="github-actions[bot]" \
-    -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-    commit --quiet -m "$AUTOFIX_SUBJECT
+TREE="$(git_ write-tree)"
+NEW_SHA="$(GIT_AUTHOR_NAME="github-actions[bot]" GIT_COMMITTER_NAME="github-actions[bot]" \
+    GIT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" \
+    GIT_COMMITTER_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" \
+    git_ commit-tree "$TREE" -p "$HEAD_SHA" -m "$AUTOFIX_SUBJECT
 
 Applied from the bazel-sync-patch artifact of $RUN_URL
 (\`make bazel-sync\`: gazelle, tools/bazel/go_srcs.py, bazel mod tidy).
 Only BUILD.bazel, MODULE.bazel and MODULE.bazel.lock are ever pushed; see
-scripts/bazel-autofix-push.sh."
+scripts/bazel-autofix-push.sh.")"
 
-if ! git -c "$AUTH_CONFIG" push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"; then
-    cd - >/dev/null
+# Leased to HEAD_SHA: if the branch moved at all since the run (including a
+# force-push back to an ancestor), the push is refused rather than resurrecting
+# commits the author dropped.
+if ! git_ -c "$AUTH_CONFIG" push --quiet \
+    "--force-with-lease=refs/heads/$HEAD_BRANCH:$HEAD_SHA" \
+    origin "$NEW_SHA:refs/heads/$HEAD_BRANCH"; then
+    cd /
     comment_fallback "pushing the fix to $HEAD_BRANCH failed (branch protection or a concurrent push)"
     exit 0
 fi
-NEW_SHA="$(git rev-parse HEAD)"
-cd - >/dev/null
+cd /
 
 echo "Pushed sync commit $NEW_SHA to $BASE_REPO/$HEAD_BRANCH."
 
@@ -293,6 +455,9 @@ cat > "$BODY" <<EOF
 $COMMENT_MARKER
 **Pushed \`${NEW_SHA:0:12}\` syncing the Bazel BUILD files** (\`make bazel-sync\` output from the [failing run]($RUN_URL)). Pull before pushing again.
 EOF
+if [ -n "$NOT_OURS_NOTE" ]; then
+    printf '\n%s\n' "$NOT_OURS_NOTE" >> "$BODY"
+fi
 if [ "$AUTOFIX_TOKEN_KIND" = "default" ]; then
     cat >> "$BODY" <<'EOF'
 
