@@ -61,6 +61,12 @@ on:
         required: false
         type: boolean
         default: false
+      dolt-lane:
+        description: "Dolt-backed lane: doltserver (hermetic, remote) or docker (testcontainers A/B control)"
+        required: false
+        type: choice
+        default: "doltserver"
+        options: [ "doltserver", "docker" ]
   workflow_call:
     inputs:
       rbe:
@@ -457,20 +463,21 @@ jobs:
           retention-days: 7
 
   # pr.yml's container-backed jobs, "Test (storage domain + uow)" and
-  # "Contract corpus", as Bazel's docker lane: --config=docker runs the
-  # requires-docker variants (domain/db, uow, tracker, doctor/fix, protocol)
-  # on this runner against its docker daemon (they are no-remote-exec);
-  # builds still execute remotely when configured. The other packages of the
-  # domain+uow job pass identically under bazel-test's --config=ci. The lane
-  # is named in one variable, so a hermetic dolt-server lane can replace it.
-  bazel-docker:
-    name: Bazel / docker lane (advisory)
+  # "Contract corpus", as Bazel's dolt-server lane: --config=doltserver runs
+  # the dolt-server variants (domain/..., uow in 8 shards, tracker/...,
+  # doctor/fix, protocol in 8 shards), each of which starts its own dolt
+  # sql-server from the pinned dolt, so they execute on the remote workers
+  # like any other test (locally for forks and rbe=off). The docker lane
+  # (--config=docker: the same suites against testcontainers on this runner,
+  # no-remote-exec) stays the A/B control: dispatch with dolt-lane=docker.
+  bazel-doltserver:
+    name: Bazel / dolt-server lane (advisory)
     # Same runner, rbe-west gate and skip rule as bazel-test.
     runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}
     timeout-minutes: 90
     env:
-      BAZEL_DOCKER_LANE: docker
+      BAZEL_DOLT_LANE: ${{ inputs.dolt-lane || 'doltserver' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -484,26 +491,28 @@ jobs:
           RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && 'oss' || '' }}
 
-      # As in the mirrored jobs; tests fail rather than skip without it.
+      # Docker lane only (the A/B control), as in the mirrored jobs; its
+      # tests fail rather than skip without the image.
       - name: Pull Dolt sql-server image
+        if: ${{ env.BAZEL_DOLT_LANE == 'docker' }}
         run: ./scripts/ci/pull-dolt-image.sh
 
-      - name: bazel test //... --config=docker
+      - name: bazel test //... --config=doltserver
         id: test
         timeout-minutes: 80
         run: |
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... "--config=$BAZEL_DOCKER_LANE" 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
-          echo "bazel test --config=$BAZEL_DOCKER_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          bazel test //... "--config=$BAZEL_DOLT_LANE" 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=$BAZEL_DOLT_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: bazel-docker-testlogs
+          name: bazel-${{ env.BAZEL_DOLT_LANE }}-testlogs
           path: |
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml

@@ -1434,7 +1434,7 @@ const (
 	bazelWorkflowName   = "bazel.yml"
 	bazelJobName        = "bazel-test"
 	bazelPureJobName    = "bazel-pure"
-	bazelDockerJobName  = "bazel-docker"
+	bazelDoltJobName    = "bazel-doltserver"
 	bazelEmbedJobName   = "bazel-embedded"
 	setupBazelActionDir = ".github/actions/setup-bazel"
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
@@ -1451,7 +1451,7 @@ const (
 
 // bazel.yml's jobs: the --config=ci lane, and one job per pr.yml job a Bazel
 // config mirrors.
-var bazelJobNames = []string{bazelDockerJobName, bazelEmbedJobName, bazelPureJobName, bazelJobName}
+var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelPureJobName, bazelJobName}
 
 // The only triggers bazel.yml may have. pull_request_target (and
 // workflow_run) would run with secrets in the context of fork PRs.
@@ -1744,41 +1744,72 @@ func TestBazelWorkflowPublishesBuildArtifacts(t *testing.T) {
 	}
 }
 
-// bazel-docker replaces pr.yml's container-backed jobs: --config=docker on a
-// runner with a docker daemon and the same pre-pulled dolt image, and a
-// requires-docker variant in every package those jobs start containers in.
-func TestBazelDockerJobMirrorsContainerJobs(t *testing.T) {
+// bazel-doltserver replaces pr.yml's container-backed jobs: --config=doltserver
+// (hermetic dolt sql-servers, remote-executable) by default, and a dolt-server
+// target in every package those jobs run. --config=docker stays reachable as
+// the A/B control (dispatch dolt-lane=docker), with the jobs' image pull.
+func TestBazelDoltJobMirrorsContainerJobs(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
-	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelDockerJobName)
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelDoltJobName)
+	pull := job.step(t, "Pull Dolt sql-server image")
 	for _, name := range []string{"test-domain-uow", "contract-corpus"} {
-		prJob := pr.job(t, name)
-		if pull := prJob.step(t, "Pull Dolt sql-server image").Run; job.step(t, "Pull Dolt sql-server image").Run != pull {
-			t.Errorf("%s pulls the dolt image differently from %s (%q)", bazelDockerJobName, name, pull)
+		if want := pr.job(t, name).step(t, "Pull Dolt sql-server image").Run; pull.Run != want {
+			t.Errorf("%s pulls the dolt image differently from %s (%q)", bazelDoltJobName, name, want)
 		}
 	}
-	if job.Env["BAZEL_DOCKER_LANE"] != "docker" {
-		t.Errorf("%s BAZEL_DOCKER_LANE = %q, want docker", bazelDockerJobName, job.Env["BAZEL_DOCKER_LANE"])
+	if pull.If != "${{ env.BAZEL_DOLT_LANE == 'docker' }}" {
+		t.Errorf("%s pulls the dolt image with if %q; only the docker lane needs it", bazelDoltJobName, pull.If)
 	}
-	test := job.step(t, "bazel test //... --config=docker")
-	if !strings.Contains(test.Run, `bazel test //... "--config=$BAZEL_DOCKER_LANE"`) || !strings.Contains(test.Run, "set -o pipefail") {
-		t.Errorf("docker lane step does not run the lane over //...:\n%s", test.Run)
+	if got := job.Env["BAZEL_DOLT_LANE"]; got != "${{ inputs.dolt-lane || 'doltserver' }}" {
+		t.Errorf("%s BAZEL_DOLT_LANE = %q, want the doltserver lane unless dispatched otherwise", bazelDoltJobName, got)
+	}
+	test := job.step(t, "bazel test //... --config=doltserver")
+	if !strings.Contains(test.Run, `bazel test //... "--config=$BAZEL_DOLT_LANE"`) || !strings.Contains(test.Run, "set -o pipefail") {
+		t.Errorf("dolt lane step does not run the lane over //...:\n%s", test.Run)
 	}
 	if strings.Contains(test.Run, "--config=remote-exec") {
-		t.Errorf("docker lane step selects remote-exec itself; setup-bazel's rc does that only when secrets are present")
+		t.Errorf("dolt lane step selects remote-exec itself; setup-bazel's rc does that only when secrets are present")
 	}
 	assertTestStepKeepsExitStatus(t, test)
 
-	// The packages whose tests start dolt containers in those jobs
-	// (test-domain-uow: domain/..., uow, tracker/... and doctor/fix;
-	// contract-corpus: protocol) each need a requires-docker target. Only
-	// under go test: scripts_test's runfiles hold no other package's BUILD.
+	rc := readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc")
+	for _, want := range []string{"test:doltserver --test_tag_filters=dolt-server", "test:docker --test_tag_filters=requires-docker"} {
+		if !strings.Contains(rc, want+"\n") {
+			t.Errorf(".bazelrc lacks %q", want)
+		}
+	}
+
+	// The packages those jobs run (test-domain-uow: domain/..., uow,
+	// tracker/... and doctor/fix; contract-corpus: protocol) each need a
+	// dolt-server target; the ones that start dolt servers pick the local
+	// backend and fail closed. Only under go test: scripts_test's runfiles
+	// hold no other package's BUILD.
 	if os.Getenv("TEST_SRCDIR") != "" {
 		return
 	}
 	root := sourceRepoRoot(t)
-	for _, pkg := range []string{"internal/storage/domain/db", "internal/storage/uow", "internal/tracker", "cmd/bd/doctor/fix", "cmd/bd/protocol"} {
-		if !strings.Contains(readPolicyFile(t, root, pkg+"/BUILD.bazel"), `"requires-docker"`) {
-			t.Errorf("%s/BUILD.bazel has no requires-docker variant for the docker lane", pkg)
+	for pkg, dolt := range map[string]bool{
+		"internal/storage/domain":      false,
+		"internal/storage/domain/db":   true,
+		"internal/storage/domain/fs":   false,
+		"internal/storage/domain/git":  false,
+		"internal/storage/uow":         true,
+		"internal/tracker":             true,
+		"internal/tracker/conformance": false,
+		"cmd/bd/doctor/fix":            true,
+		"cmd/bd/protocol":              true,
+	} {
+		build := readPolicyFile(t, root, pkg+"/BUILD.bazel")
+		if !strings.Contains(build, `tags = ["dolt-server"]`) {
+			t.Errorf("%s/BUILD.bazel has no dolt-server target for the dolt-server lane", pkg)
+		}
+		for _, env := range []string{`"BEADS_TEST_DOLT_SERVER": "local"`, `"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"`} {
+			if dolt && !strings.Contains(build, env) {
+				t.Errorf("%s/BUILD.bazel: the dolt-server target lacks %s", pkg, env)
+			}
+		}
+		if dolt && !strings.Contains(build, `"requires-docker"`) {
+			t.Errorf("%s/BUILD.bazel has no requires-docker variant for the docker A/B lane", pkg)
 		}
 	}
 }

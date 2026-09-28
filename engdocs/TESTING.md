@@ -99,6 +99,12 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
 failure (per test and in every `TestMain`) instead of a skip; lanes that
 exist to run the Dolt suites set it.
 
+Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
+suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs
+on the `local` backend (the `dolt-server` targets); they need no docker and
+execute remotely with `--config=remote-exec`. `--config=docker` runs the same
+suites on the `container` backend (host docker) as the A/B control.
+
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
 do not inherit the developer's global hooks configuration.
