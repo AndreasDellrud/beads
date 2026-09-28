@@ -386,3 +386,55 @@ jobs:
           n="$(grep -c '<testcase ' bazel-testlogs/cmd/bd/bd_test/test.xml || true)"
           echo "pure cmd/bd subset: $n test cases"
           (( n > 0 ))
+
+  # pr.yml's container-backed jobs, "Test (storage domain + uow)" and
+  # "Contract corpus", as Bazel's docker lane: --config=docker runs the
+  # requires-docker variants (domain/db, uow, tracker, doctor/fix, protocol)
+  # on this runner against its docker daemon (they are no-remote-exec);
+  # builds still execute remotely when configured. The other packages of the
+  # domain+uow job pass identically under bazel-test's --config=ci. The lane
+  # is named in one variable, so a hermetic dolt-server lane can replace it.
+  bazel-docker:
+    name: Bazel / docker lane (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BAZEL_DOCKER_LANE: docker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Bazel
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ (inputs.rbe || 'on') != 'off' && secrets.BAZEL_REMOTE_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_INSTANCE || '' }}
+
+      # As in the mirrored jobs; tests fail rather than skip without it.
+      - name: Pull Dolt sql-server image
+        run: ./scripts/ci/pull-dolt-image.sh
+
+      - name: bazel test //... --config=docker
+        id: test
+        timeout-minutes: 80
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          bazel test //... "--config=$BAZEL_DOCKER_LANE" 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=$BAZEL_DOCKER_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Upload test logs
+        if: ${{ failure() && steps.test.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bazel-docker-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 7

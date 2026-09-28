@@ -1425,6 +1425,7 @@ const (
 	bazelWorkflowName   = "bazel.yml"
 	bazelJobName        = "bazel-test"
 	bazelPureJobName    = "bazel-pure"
+	bazelDockerJobName  = "bazel-docker"
 	setupBazelActionDir = ".github/actions/setup-bazel"
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
@@ -1440,7 +1441,7 @@ const (
 
 // bazel.yml's jobs: the --config=ci lane, and one job per pr.yml job a Bazel
 // config mirrors.
-var bazelJobNames = []string{bazelPureJobName, bazelJobName}
+var bazelJobNames = []string{bazelDockerJobName, bazelPureJobName, bazelJobName}
 
 // The only triggers bazel.yml may have. pull_request_target (and
 // workflow_run) would run with secrets in the context of fork PRs.
@@ -1686,6 +1687,48 @@ func TestBazelWorkflowPublishesBuildArtifacts(t *testing.T) {
 	// test:ci must download the binary under --remote_download_minimal.
 	if !strings.Contains(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "test:ci --remote_download_regex=.*/bin/cmd/bd/bd_for_tests/bd$") {
 		t.Error(".bazelrc test:ci does not download //cmd/bd:bd_for_tests")
+	}
+}
+
+// bazel-docker replaces pr.yml's container-backed jobs: --config=docker on a
+// runner with a docker daemon and the same pre-pulled dolt image, and a
+// requires-docker variant in every package those jobs start containers in.
+func TestBazelDockerJobMirrorsContainerJobs(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelDockerJobName)
+	for _, name := range []string{"test-domain-uow", "contract-corpus"} {
+		prJob := pr.job(t, name)
+		if job.RunsOn != prJob.RunsOn {
+			t.Errorf("%s runs on %q, want %s's %q", bazelDockerJobName, job.RunsOn, name, prJob.RunsOn)
+		}
+		if pull := prJob.step(t, "Pull Dolt sql-server image").Run; job.step(t, "Pull Dolt sql-server image").Run != pull {
+			t.Errorf("%s pulls the dolt image differently from %s (%q)", bazelDockerJobName, name, pull)
+		}
+	}
+	if job.Env["BAZEL_DOCKER_LANE"] != "docker" {
+		t.Errorf("%s BAZEL_DOCKER_LANE = %q, want docker", bazelDockerJobName, job.Env["BAZEL_DOCKER_LANE"])
+	}
+	test := job.step(t, "bazel test //... --config=docker")
+	if !strings.Contains(test.Run, `bazel test //... "--config=$BAZEL_DOCKER_LANE"`) || !strings.Contains(test.Run, "set -o pipefail") {
+		t.Errorf("docker lane step does not run the lane over //...:\n%s", test.Run)
+	}
+	if strings.Contains(test.Run, "--config=remote-exec") {
+		t.Errorf("docker lane step selects remote-exec itself; setup-bazel's rc does that only when secrets are present")
+	}
+	assertTestStepKeepsExitStatus(t, test)
+
+	// The packages whose tests start dolt containers in those jobs
+	// (test-domain-uow: domain/..., uow, tracker/... and doctor/fix;
+	// contract-corpus: protocol) each need a requires-docker target. Only
+	// under go test: scripts_test's runfiles hold no other package's BUILD.
+	if os.Getenv("TEST_SRCDIR") != "" {
+		return
+	}
+	root := sourceRepoRoot(t)
+	for _, pkg := range []string{"internal/storage/domain/db", "internal/storage/uow", "internal/tracker", "cmd/bd/doctor/fix", "cmd/bd/protocol"} {
+		if !strings.Contains(readPolicyFile(t, root, pkg+"/BUILD.bazel"), `"requires-docker"`) {
+			t.Errorf("%s/BUILD.bazel has no requires-docker variant for the docker lane", pkg)
+		}
 	}
 }
 
