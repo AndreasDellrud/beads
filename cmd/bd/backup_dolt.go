@@ -143,6 +143,20 @@ Run 'bd backup init <path>' first to configure a destination.`,
 
 		ctx := rootCtx
 		if usesProxiedServer() {
+			if err := requireLocalProxiedBackup("backup sync"); err != nil {
+				return err
+			}
+		}
+		release, err := acquireBackupLock(backupLockWait)
+		if err != nil {
+			if errors.Is(err, errBackupBusy) {
+				return HandleErrorRespectJSON("%v; retry when it completes", err)
+			}
+			return HandleErrorRespectJSON("%v", err)
+		}
+		defer release()
+
+		if usesProxiedServer() {
 			return runBackupSyncProxied(ctx)
 		}
 		if store == nil {

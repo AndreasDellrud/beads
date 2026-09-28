@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -209,6 +210,19 @@ func maybeAutoBackup(ctx context.Context) {
 		debug.Logf("backup: no changes since last backup\n")
 		return
 	}
+
+	// One backup at a time per workspace (backup_lock.go). Auto-backup never
+	// waits: a held lock means a backup is already running.
+	release, err := acquireBackupLock(0)
+	if err != nil {
+		if errors.Is(err, errBackupBusy) {
+			debug.Logf("backup: skipping — another backup is running\n")
+			return
+		}
+		fmt.Fprintf(os.Stderr, "Warning: auto-backup skipped: %v\n", err)
+		return
+	}
+	defer release()
 
 	// Run the backup (force=true since we already checked change detection above)
 	if _, err := runBackupExport(ctx, backend, true); err != nil {
