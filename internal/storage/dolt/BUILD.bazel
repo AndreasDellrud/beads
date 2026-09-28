@@ -315,6 +315,7 @@ go_test(
         "version_commit_deferred_test.go",
         "version_reconciler_contract_test.go",
         "version_scope_completeness_test.go",
+        "version_staging_completeness_test.go",
         "versioned_test.go",
         "wisp_custom_type_tx_test.go",
         "wisp_gc_test.go",
