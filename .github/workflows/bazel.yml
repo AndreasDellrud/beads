@@ -319,7 +319,12 @@ jobs:
 
           # Same selector and count guard as pr.yml's job.
           test_status=0
-          test_output="$("$(go env GOROOT)/lib/wasm/go_js_wasm_exec" "$GITHUB_WORKSPACE/$bin" \
+          # wasm_exec.js caps argv+env size; the Blacksmith runner's environment
+          # exceeds it, so run with only what the hook test needs.
+          wasm_exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec"
+          test_output="$(env -i PATH="$PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+            BD_DISABLE_METRICS=1 BD_DISABLE_EVENT_FLUSH=1 \
+            "$wasm_exec" "$GITHUB_WORKSPACE/$bin" \
             -test.run '^TestRunHookReportsUnsupportedExecution$' \
             -test.v 2>&1)" || test_status=$?
           printf '%s\n' "$test_output"
