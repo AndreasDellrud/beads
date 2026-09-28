@@ -115,7 +115,7 @@ sh_test(
     args = ["$(rootpath :fix_test)"],
     data = [":fix_test"],
     # Pinned to the container backend (the docker lane is the A/B control);
-    # unpinned, bazel test would use the local dolt sql-server backend.
+    # rule env beats --test_env, so =local on the command line cannot flip it.
     env = {
         "BEADS_FIX_REQUIRE_DOLT": "1",
         "BEADS_TEST_DOLT_SERVER": "container",

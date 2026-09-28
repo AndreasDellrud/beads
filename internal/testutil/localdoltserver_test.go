@@ -415,7 +415,8 @@ func TestDoltBackendSelection(t *testing.T) {
 		bad         bool
 	}{
 		{"", "", false, false},
-		{"", "/runfiles", true, false},
+		{"", "/runfiles", false, false}, // bazel: local only when a target or --test_env asks
+		{"local", "/runfiles", true, false},
 		{"container", "/runfiles", false, false},
 		{"local", "", true, false},
 		{"docker", "", false, true},

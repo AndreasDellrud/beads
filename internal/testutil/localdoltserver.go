@@ -18,8 +18,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // EnvDoltServerBackend selects where the test Dolt SQL server comes from:
@@ -29,9 +27,13 @@ import (
 //	local      `dolt sql-server` from the pinned dolt CLI, started by the test
 //	           process itself (no docker; works under remote execution)
 //
-// Unset means container under plain `go test` (unchanged behavior) and local
-// under `bazel test`, where a docker daemon is not part of the action and
-// the pinned CLI always is (tools/bazel/test_env.sh).
+// Unset means container, under plain `go test` and `bazel test` alike. A
+// Bazel action has no docker daemon, so there an unset target keeps the
+// pre-existing "Dolt unavailable, skipping" behavior; only targets (or
+// invocations, via --test_env) that set local explicitly start servers from
+// the pinned CLI that tools/bazel/test_env.sh puts on PATH. Defaulting to
+// local under Bazel would light up every Dolt suite that no lane runs with a
+// server today in every non-ci `bazel test`.
 const EnvDoltServerBackend = "BEADS_TEST_DOLT_SERVER"
 
 // EnvDoltServerGOMAXPROCS caps the CPUs a local test server uses. The
@@ -50,14 +52,7 @@ const EnvDoltServerVerbose = "BEADS_TEST_DOLT_SERVER_VERBOSE"
 // unrecognized BEADS_TEST_DOLT_SERVER value is reported by checkDolt (see
 // doltBackendErr) rather than guessed at.
 func useLocalDoltServer() bool {
-	switch os.Getenv(EnvDoltServerBackend) {
-	case "local":
-		return true
-	case "container":
-		return false
-	default:
-		return bazeltest.IsBazel()
-	}
+	return os.Getenv(EnvDoltServerBackend) == "local"
 }
 
 // doltBackendErr rejects a BEADS_TEST_DOLT_SERVER value that names neither

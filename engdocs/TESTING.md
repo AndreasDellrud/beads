@@ -90,7 +90,10 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
   (needs docker and the pulled image). The default under plain `go test`.
 - `local`: a `dolt sql-server` started by the test process from the pinned
   dolt CLI (`BEADS_TEST_DOLT_BINARY`, else `dolt` on `PATH`; it must be the
-  image's version). No docker. The default under `bazel test`.
+  image's version). No docker. Used only when explicitly selected, under
+  `go test` and `bazel test` alike (a Bazel target's `env`, or
+  `--test_env=BEADS_TEST_DOLT_SERVER=local`); unset means `container`, which
+  in a Bazel action without docker keeps the usual skip.
 
 `BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
 failure (per test and in every `TestMain`) instead of a skip; lanes that
