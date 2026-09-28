@@ -1,8 +1,10 @@
 package scripts_test
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -1413,4 +1415,301 @@ func captureOne(t *testing.T, pattern, body, source string) string {
 		t.Fatalf("%s does not match %s", source, pattern)
 	}
 	return matches[1]
+}
+
+// --- Bazel lane (.github/workflows/bazel.yml, advisory) ----------------------
+
+const (
+	bazelWorkflowName   = "bazel.yml"
+	bazelJobName        = "bazel-test"
+	setupBazelActionDir = ".github/actions/setup-bazel"
+	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+	checkoutSHA         = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+	bazelCacheKeyPrefix = "bazel-v1-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}-"
+	bazelCachePath      = "${{ runner.temp }}/bazel-ci-cache"
+)
+
+type ciCompositeAction struct {
+	Runs struct {
+		Using string           `yaml:"using"`
+		Steps []ciWorkflowStep `yaml:"steps"`
+	} `yaml:"runs"`
+}
+
+func readSetupBazelAction(t *testing.T) ciCompositeAction {
+	t.Helper()
+	path := filepath.Join(sourceRepoRoot(t), setupBazelActionDir, "action.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var action ciCompositeAction
+	if err := yaml.Unmarshal(data, &action); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	if action.Runs.Using != "composite" {
+		t.Fatalf("%s runs.using = %q, want composite", path, action.Runs.Using)
+	}
+	return action
+}
+
+// The Bazel lane is advisory until the equivalence record and a human promote
+// it: no ci-gate may need it or list it in CI_GATE_REQUIRED.
+func TestBazelWorkflowIsAdvisory(t *testing.T) {
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	if len(workflow.Jobs) != 1 {
+		t.Errorf("%s jobs = %d, want only %q", bazelWorkflowName, len(workflow.Jobs), bazelJobName)
+	}
+	job := workflow.job(t, bazelJobName)
+	if job.ContinueOnError {
+		t.Errorf("%s continue-on-error hides failures; the lane is advisory by staying out of ci-gate", bazelJobName)
+	}
+	for _, name := range []string{"pr.yml", "pr-risk.yml"} {
+		for jobName, j := range readCIWorkflow(t, name).Jobs {
+			for _, need := range j.Needs {
+				if strings.Contains(strings.ToLower(need), "bazel") {
+					t.Errorf("%s job %q needs %q; the Bazel lane is advisory", name, jobName, need)
+				}
+			}
+			for _, step := range j.Steps {
+				for key, value := range step.Env {
+					if strings.Contains(strings.ToUpper(key), "BAZEL") ||
+						(key == "CI_GATE_REQUIRED" && strings.Contains(strings.ToUpper(value), "BAZEL")) {
+						t.Errorf("%s job %q step %q env %s=%q wires the Bazel lane into a gate", name, jobName, step.Name, key, value)
+					}
+				}
+			}
+		}
+	}
+}
+
+// Every action in the Bazel lane is pinned to a full commit SHA, with the same
+// released SHAs the Go lanes use, and the monolithic actions/cache is banned
+// here too (restore everywhere, save only where the topology says).
+func TestBazelWorkflowActionsArePinned(t *testing.T) {
+	steps := map[string][]ciWorkflowStep{
+		bazelWorkflowName:                   readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName).Steps,
+		setupBazelActionDir + "/action.yml": readSetupBazelAction(t).Runs.Steps,
+	}
+	want := map[string]string{
+		"actions/checkout":        checkoutSHA,
+		setupGoActionFamily:       setupGoSHA,
+		cacheRestoreActionFamily:  cacheSHA,
+		cacheSaveActionFamily:     cacheSHA,
+		"actions/upload-artifact": uploadArtifactSHA,
+	}
+	for file, list := range steps {
+		for _, step := range list {
+			if step.Uses == "" || strings.HasPrefix(step.Uses, "./") {
+				continue
+			}
+			family, sha, found := strings.Cut(step.Uses, "@")
+			if !found || !actionPin.MatchString(sha) {
+				t.Errorf("%s step %q action %q is not pinned to a 40-hex commit SHA", file, step.Name, step.Uses)
+				continue
+			}
+			if isForbiddenGoCacheActionFamily(family) {
+				t.Errorf("%s step %q uses forbidden monolithic %q; use actions/cache/restore and /save", file, step.Name, family)
+				continue
+			}
+			wantSHA, known := want[family]
+			if !known {
+				t.Errorf("%s step %q uses %q, which this policy does not know; add its released SHA here", file, step.Name, family)
+			} else if sha != wantSHA {
+				t.Errorf("%s step %q action %q has SHA %q, want %q", file, step.Name, family, sha, wantSHA)
+			}
+			if family == setupGoActionFamily && step.With["cache"] != "false" {
+				t.Errorf("%s setup-go cache = %q, want false", file, step.With["cache"])
+			}
+			if family == cacheSaveActionFamily && file != bazelWorkflowName {
+				t.Errorf("%s step %q saves a cache; only %s's push-to-main step may", file, step.Name, bazelWorkflowName)
+			}
+		}
+		for _, step := range list {
+			if strings.Contains(step.Run, "apt-get") {
+				t.Errorf("%s step %q runs apt-get; bound it (see ci_workflow_apt_get_timeout_test.go) or drop it", file, step.Name)
+			}
+		}
+	}
+}
+
+// The runner cache is written only by push-to-main under a run-unique key and
+// restored by prefix (gascity froze its cache at the first exact-key save),
+// and it never holds the generated rc or credentials.
+func TestBazelWorkflowCacheTopology(t *testing.T) {
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName)
+	var saves []ciWorkflowStep
+	for _, step := range job.Steps {
+		if actionFamily(step.Uses) == cacheSaveActionFamily {
+			saves = append(saves, step)
+		}
+	}
+	if len(saves) != 1 {
+		t.Fatalf("%s has %d cache save steps, want 1", bazelWorkflowName, len(saves))
+	}
+	save := saves[0]
+	for _, required := range []string{"github.event_name == 'push'", "github.ref == 'refs/heads/main'"} {
+		if !strings.Contains(save.If, required) {
+			t.Errorf("cache save if = %q, missing %q", save.If, required)
+		}
+	}
+	if save.With["key"] != bazelCacheKeyPrefix+"${{ github.run_id }}" || save.With["path"] != bazelCachePath {
+		t.Errorf("cache save key/path = %q / %q, want %q / %q", save.With["key"], save.With["path"], bazelCacheKeyPrefix+"${{ github.run_id }}", bazelCachePath)
+	}
+
+	var restore, writer ciWorkflowStep
+	for _, step := range readSetupBazelAction(t).Runs.Steps {
+		switch {
+		case actionFamily(step.Uses) == cacheRestoreActionFamily:
+			restore = step
+		case step.Env["BAZEL_CI_SECRET_DIR"] != "":
+			writer = step
+		}
+	}
+	if restore.With["path"] != bazelCachePath || restore.With["key"] != save.With["key"] ||
+		!strings.Contains(restore.With["restore-keys"], bazelCacheKeyPrefix) {
+		t.Errorf("setup-bazel restore path/key/restore-keys = %q / %q / %q; want the save step's path and key with a %q prefix fallback",
+			restore.With["path"], restore.With["key"], restore.With["restore-keys"], bazelCacheKeyPrefix)
+	}
+	if writer.Env["BAZEL_CI_CACHE_DIR"] != bazelCachePath {
+		t.Errorf("rc writer BAZEL_CI_CACHE_DIR = %q, want %q", writer.Env["BAZEL_CI_CACHE_DIR"], bazelCachePath)
+	}
+	if secret := writer.Env["BAZEL_CI_SECRET_DIR"]; !strings.HasPrefix(secret, "${{ runner.temp }}/") || strings.HasPrefix(secret, bazelCachePath) {
+		t.Errorf("rc writer BAZEL_CI_SECRET_DIR = %q; want a runner.temp directory outside the cached %q", secret, bazelCachePath)
+	}
+}
+
+// The lane runs the committed ci config over //..., reports the critical path
+// even when tests fail, catches BUILD drift, and
+// hands secrets to nothing but setup-bazel.
+func TestBazelWorkflowRunsCIConfigWithReports(t *testing.T) {
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName)
+	if job.TimeoutMinutes == 0 {
+		t.Errorf("%s has no timeout-minutes", bazelJobName)
+	}
+	testStep := job.step(t, "bazel test //... --config=ci")
+	for _, required := range []string{"bazel test //... --config=ci", "--profile=", "--build_event_json_file=", "set -o pipefail"} {
+		if !strings.Contains(testStep.Run, required) {
+			t.Errorf("test step does not contain %q:\n%s", required, testStep.Run)
+		}
+	}
+	if strings.Contains(testStep.Run, "--config=remote-exec") {
+		t.Errorf("test step selects remote-exec itself; setup-bazel's rc does that only when secrets are present")
+	}
+	if i, j := strings.Index(testStep.Run, "bazel test"), strings.Index(testStep.Run, "--profile="); j < i {
+		t.Errorf("--profile is a command option and must follow `bazel test`")
+	}
+	for name, script := range map[string]string{
+		"Critical-path report": "tools/bazel/critpath.py",
+	} {
+		step := job.step(t, name)
+		if !strings.Contains(step.Run, script) || !strings.Contains(step.If, "always()") {
+			t.Errorf("step %q must run %s under always(); run=%q if=%q", name, script, step.Run, step.If)
+		}
+		if strings.Contains(step.Run, "|| true") {
+			t.Errorf("step %q swallows its exit status", name)
+		}
+	}
+	sync := job.step(t, "BUILD files in sync (gazelle, go_srcs, MODULE.bazel)")
+	for _, required := range []string{"make bazel-sync-check", "make bazel-sync\n", "git status --porcelain --untracked-files=all", "exit 1"} {
+		if !strings.Contains(sync.Run, required) {
+			t.Errorf("sync step does not contain %q:\n%s", required, sync.Run)
+		}
+	}
+	for _, step := range job.Steps {
+		refs := strings.Contains(step.Run, "secrets.") || strings.Contains(fmt.Sprint(step.With), "secrets.")
+		for _, v := range step.Env {
+			refs = refs || strings.Contains(v, "secrets.")
+		}
+		if refs && step.Uses != "./"+setupBazelActionDir {
+			t.Errorf("step %q reads secrets; only setup-bazel may", step.Name)
+		}
+	}
+}
+
+// write-bazelrc.sh: no secrets means a local-only rc (fork PRs), a partial set
+// fails, and the full set enables remote-exec with the key material and rc
+// outside the workspace and the runner cache.
+func TestSetupBazelRCWriter(t *testing.T) {
+	bash := requireHostTool(t, "bash")
+	script := filepath.Join(sourceRepoRoot(t), setupBazelActionDir, "write-bazelrc.sh")
+	pem := func(kind string) string {
+		body := "-----BEGIN " + kind + "-----\nMIIBfake\n-----END " + kind + "-----\n"
+		return base64.StdEncoding.EncodeToString([]byte(body))
+	}
+	run := func(t *testing.T, extra ...string) (string, string, string, error) {
+		t.Helper()
+		dir := t.TempDir()
+		workspace := filepath.Join(dir, "ws")
+		if err := os.MkdirAll(workspace, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out := filepath.Join(dir, "github_output")
+		secret := filepath.Join(dir, "secret")
+		cmd := exec.Command(bash, script)
+		cmd.Dir = workspace
+		cmd.Env = append([]string{
+			"PATH=" + os.Getenv("PATH"),
+			"GITHUB_WORKSPACE=" + workspace,
+			"GITHUB_OUTPUT=" + out,
+			"BAZEL_CI_CACHE_DIR=" + filepath.Join(dir, "cache"),
+			"BAZEL_CI_SECRET_DIR=" + secret,
+		}, extra...)
+		logs, err := cmd.CombinedOutput()
+		outputs, _ := os.ReadFile(out)
+		rc, _ := os.ReadFile(filepath.Join(secret, "ci.bazelrc"))
+		return string(outputs), string(rc), string(logs), err
+	}
+	executor := "BAZEL_REMOTE_EXECUTOR=grpcs://" + "farm.invalid:443"
+
+	t.Run("no secrets stays local", func(t *testing.T) {
+		outputs, rc, logs, err := run(t)
+		if err != nil {
+			t.Fatalf("err=%v\n%s", err, logs)
+		}
+		if !strings.Contains(outputs, "remote=false") || strings.Contains(rc, "remote") || strings.Contains(rc, "tls") {
+			t.Errorf("outputs=%q rc=%q; want remote=false and no remote flags", outputs, rc)
+		}
+		if !strings.Contains(rc, "--repository_cache=") || strings.Contains(rc, "--disk_cache=") {
+			t.Errorf("local rc = %q; want --repository_cache and no --disk_cache (local runs never save it)", rc)
+		}
+	})
+	for name, env := range map[string][]string{
+		"executor only":    {executor},
+		"cert and key":     {"RBE_TLS_CERT=" + pem("CERTIFICATE"), "RBE_TLS_KEY=" + pem("PRIVATE KEY")},
+		"executor no key":  {executor, "RBE_TLS_CERT=" + pem("CERTIFICATE")},
+		"cert not pem b64": {executor, "RBE_TLS_CERT=bm90IGEgcGVt", "RBE_TLS_KEY=" + pem("PRIVATE KEY")},
+	} {
+		t.Run("rejects "+name, func(t *testing.T) {
+			if _, _, logs, err := run(t, env...); err == nil {
+				t.Errorf("want failure, got success:\n%s", logs)
+			}
+		})
+	}
+	t.Run("full set enables remote-exec", func(t *testing.T) {
+		outputs, rc, logs, err := run(t, executor, "RBE_TLS_CERT="+pem("CERTIFICATE"), "RBE_TLS_KEY="+pem("PRIVATE KEY"))
+		if err != nil {
+			t.Fatalf("err=%v\n%s", err, logs)
+		}
+		for _, want := range []string{"build:remote-exec --remote_executor=grpcs://farm.invalid:443", "--tls_client_certificate=", "--tls_client_key=", "build --config=remote-exec", "build --disk_cache="} {
+			if !strings.Contains(rc, want) {
+				t.Errorf("rc lacks %q:\n%s", want, rc)
+			}
+		}
+		if !strings.Contains(outputs, "remote=true") {
+			t.Errorf("outputs = %q, want remote=true", outputs)
+		}
+		if !strings.Contains(logs, "::add-mask::farm.invalid\n") {
+			t.Errorf("bare executor host is not masked:\n%s", logs)
+		}
+	})
+	t.Run("secret dir inside workspace fails", func(t *testing.T) {
+		dir := t.TempDir()
+		cmd := exec.Command(bash, script)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_WORKSPACE=" + dir,
+			"BAZEL_CI_CACHE_DIR=" + filepath.Join(t.TempDir(), "c"), "BAZEL_CI_SECRET_DIR=" + filepath.Join(dir, "s")}
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Errorf("want failure for a secret dir inside the workspace:\n%s", out)
+		}
+	})
 }
