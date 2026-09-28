@@ -64,7 +64,8 @@ go_library(
 # TestBuildErrorIsMaskedByChmod runs SubprocessRunner's `go test -c` for a
 # missing package; the pinned SDK's go (plus pkg/tool, which `go test` needs
 # for vet) and the module's go.mod/go.sum stand in for the toolchain and
-# checkout `go test` has.
+# checkout `go test` has. integration-only: outside that config the target
+# is empty, so the tag keeps it out of --config=prcore/ci (gazelle keeps it).
 go_test(
     name = "integration_test",
     srcs = ["harness_test.go"],
@@ -76,4 +77,5 @@ go_test(
     ],
     embed = [":integration"],
     env = {"BEADS_TEST_GO_BINARY": "$(rlocationpath @go_sdk//:bin/go)"},
+    tags = ["integration-only"],
 )

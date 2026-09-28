@@ -34,7 +34,10 @@ test:prcore --test_env=BEADS_TEST_SKIP=dolt
 # As in pr.yml's PR Core step: a root or non-POSIX executor fails
 # TestAddExcludePatternsRefusesReadErrors instead of skipping it.
 test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
-test:prcore --test_tag_filters=-requires-docker,-dolt-server,-embedded,-manual
+# Every tag that belongs to another lane (scripts/bazel_policy_test.go
+# bazelPRCoreExcludedTags). integration-only targets run zero tests outside
+# --config=integration.
+test:prcore --test_tag_filters=-requires-docker,-dolt-server,-embedded,-manual,-integration-only
 
 test:ci --config=prcore
 test:ci --keep_going --test_summary=terse
@@ -133,9 +136,11 @@ test:doltserver --remote_download_regex=.*/test\.(log|xml)$
 build:integration --@rules_go//go/config:tags=gms_pure_go,integration
 test:integration --@rules_go//go/config:race
 test:integration --test_env=BEADS_TEST_SKIP=dolt
-# The same variants the PR-core lane leaves out stay out: the jobs'
-# BEADS_TEST_SKIP=dolt keeps every container-backed test skipped, which is
-# what the untagged base targets already do.
+# The variants the PR-core lane leaves out stay out, except integration-only
+# (targets with tests only under the tag): the jobs' BEADS_TEST_SKIP=dolt
+# keeps every container- or server-backed test skipped, which is what the
+# untagged base targets already do. scripts/bazel_policy_test.go derives the
+# required exclusions from the PR-core list, so a new lane tag lands here too.
 test:integration --test_tag_filters=-requires-docker,-dolt-server,-embedded,-manual
 test:integration --build_tests_only
 test:integration --keep_going
@@ -153,6 +158,11 @@ test:integration --test_arg=-test.timeout=19m
 test:integration --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
 # -test.v in test.xml, as in test:ci, for tools/bazel/equivalence.py.
 test:integration --test_env=GO_TEST_WRAP_TESTV=1
+# ci and integration build into the same output directory (the tags flag
+# does not change it), so they share bazel-testlogs: a lane's test.xml is
+# overwritten by the other lane's next run of the same target. Run
+# equivalence.py / check_testcases.py right after each lane's own
+# `bazel test`, before the other lane runs (or give the lanes separate jobs).
 test:integration --remote_download_regex=.*/test\.xml$
 
 # Pure-Go lane: pr.yml's "Check pure-Go and js/wasm boundaries
