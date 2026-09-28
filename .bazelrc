@@ -41,6 +41,8 @@ test:ci --keep_going --test_summary=terse
 # test.xml on the remote side, so ask for both.
 test:ci --test_env=GO_TEST_WRAP_TESTV=1
 test:ci --remote_download_regex=.*/test\.xml$
+# bazel.yml publishes the non-race bd as pr.yml's ci-build-artifacts.
+test:ci --remote_download_regex=.*/bin/cmd/bd/bd_for_tests/bd$
 
 # Docker lane: only the requires-docker targets (pr.yml's container-backed
 # jobs), on a host with a docker daemon. Race like those jobs, but no -short

@@ -1634,6 +1634,44 @@ func TestBazelWorkflowRunsCIConfigWithReports(t *testing.T) {
 	}
 }
 
+// bazel.yml publishes a Bazel-built bd under pr.yml's build-artifacts contract
+// (artifact name, file names, checksum file, retention), so the jobs that
+// download ci-build-artifacts can switch to it without other edits.
+func TestBazelWorkflowPublishesBuildArtifacts(t *testing.T) {
+	var prUpload ciWorkflowStep
+	for _, step := range readCIWorkflow(t, "pr.yml").job(t, "build-artifacts").Steps {
+		if actionFamily(step.Uses) == "actions/upload-artifact" {
+			prUpload = step
+		}
+	}
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName)
+	pkg := job.step(t, "Package bd (ci-build-artifacts layout)")
+	upload := job.step(t, "Upload build artifacts")
+	if prUpload.With["name"] != "ci-build-artifacts" || upload.With["name"] != prUpload.With["name"] {
+		t.Errorf("artifact name = %q, want pr.yml's %q (ci-build-artifacts)", upload.With["name"], prUpload.With["name"])
+	}
+	for _, key := range []string{"retention-days", "if-no-files-found"} {
+		if upload.With[key] != prUpload.With[key] {
+			t.Errorf("upload %s = %q, want pr.yml's %q", key, upload.With[key], prUpload.With[key])
+		}
+	}
+	if pkg.ID == "" || upload.If != "${{ always() && steps."+pkg.ID+".outcome == 'success' }}" {
+		t.Errorf("upload if = %q; want it gated on the package step's success", upload.If)
+	}
+	for _, required := range []string{
+		"/bin/cmd/bd/bd_for_tests/bd", "bd-linux-gms-pure", "sha256sum bd-linux-gms-pure > SHA256SUMS",
+		"build-manifest.txt", "commit=", "go_version=", "build_tags=", "artifact=bd-linux-gms-pure",
+	} {
+		if !strings.Contains(pkg.Run, required) {
+			t.Errorf("package step does not contain %q:\n%s", required, pkg.Run)
+		}
+	}
+	// test:ci must download the binary under --remote_download_minimal.
+	if !strings.Contains(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "test:ci --remote_download_regex=.*/bin/cmd/bd/bd_for_tests/bd$") {
+		t.Error(".bazelrc test:ci does not download //cmd/bd:bd_for_tests")
+	}
+}
+
 // swallowedExit matches shell that hides a failing command's status.
 var swallowedExit = regexp.MustCompile(`\bexit\b|\|\|\s*(true|:)|;\s*(true|:)\s*$|\bset\s+\+e\b|\btrap\b`)
 
