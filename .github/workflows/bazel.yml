@@ -23,11 +23,12 @@
 # write the runner cache. In place: secrets are referenced by the setup step
 # alone and never by a workflow- or job-level env (policy-tested), decoded key
 # material is masked in logs, and CI uploads only remotely executed results
-# (--noremote_upload_local_results in the generated rc). Pending (human
-# decisions, plan H1/F2): a beads-only, independently revocable certificate;
-# a beads-only RBE_INSTANCE; farm-side denial of client action-cache writes;
-# whether same-repo PRs keep remote execution. Until then the lane is
-# advisory and nothing downstream consumes artifacts built here.
+# (--noremote_upload_local_results in the generated rc), and the certificate
+# is issued to beads CI alone, so it can be revoked without affecting other
+# clients. Maintainers decided (2026-09-28) that same-repo PRs keep remote
+# execution under this model. Still open: a beads-only RBE_INSTANCE and
+# farm-side denial of client action-cache writes. The lane is advisory and
+# nothing downstream consumes artifacts built here.
 #
 # Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
 # 2 GB (Bazel's --repository_cache plus Bazelisk's Bazel download), written
