@@ -90,8 +90,9 @@ test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
 4. **Sync Bazel BUILD files** if you added, removed or renamed Go files, or
    changed imports or `go.mod`: `make bazel-sync` (needs Bazel), then commit
    the BUILD.bazel / MODULE.bazel changes. Without Bazel, let CI do it: on
-   same-repo PRs the bazel-autofix workflow pushes the fix to your branch
-   (pull before pushing again); fork PRs get a comment with an apply recipe.
+   same-repo PRs the bazel-autofix workflow pushes the fix for the packages
+   your PR changed to your branch (pull before pushing again); fork PRs get
+   a comment with an apply recipe.
 5. **Commit**: With git hooks installed (`bd hooks install`), Dolt changes are auto-committed
 
 ### Commit Message Convention

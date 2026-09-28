@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2604,16 +2605,13 @@ func TestBazelAutofixWorkflowSecurity(t *testing.T) {
 	if err := root.Decode(&doc); err != nil {
 		t.Fatal(err)
 	}
-	// "Bazel" runs the sync step on pull_request itself; "PR" covers bazel.yml
-	// called from pr.yml. Both names must match real workflows.
-	if want := []string{"Bazel", "PR"}; !reflect.DeepEqual(doc.On.WorkflowRun.Workflows, want) {
+	// Only "Bazel" (bazel.yml on pull_request) uploads bazel-sync-patch. Any
+	// other trigger would only ever be a no-op run (and, with a shared
+	// concurrency group, could get in a real fix's way).
+	if want := []string{"Bazel"}; !reflect.DeepEqual(doc.On.WorkflowRun.Workflows, want) {
 		t.Errorf("workflow_run.workflows = %v, want %v", doc.On.WorkflowRun.Workflows, want)
 	}
-	for file, name := range map[string]string{bazelWorkflowName: "Bazel", "pr.yml": "PR"} {
-		if got := yamlScalar(readYAMLNode(t, filepath.Join(".github", "workflows", file)), "name"); got != name {
-			t.Errorf("%s name = %q, want %q (the workflow_run trigger names it)", file, got, name)
-		}
-	}
+	requireWorkflowProducesArtifact(t, bazelWorkflowName, "Bazel", "bazel-sync-patch")
 	if !reflect.DeepEqual(doc.On.WorkflowRun.Types, []string{"completed"}) {
 		t.Errorf("workflow_run.types = %v, want [completed]", doc.On.WorkflowRun.Types)
 	}
@@ -2643,8 +2641,8 @@ func TestBazelAutofixWorkflowSecurity(t *testing.T) {
 			if family != "actions/checkout" || sha != checkoutSHA {
 				t.Errorf("step %q uses %q; only actions/checkout@%s is allowed", step.Name, step.Uses, checkoutSHA)
 			}
-			if len(step.With) != 0 {
-				t.Errorf("checkout has with %v; it must check out the base default branch, never a PR ref", step.With)
+			if !reflect.DeepEqual(step.With, map[string]string{"persist-credentials": "false"}) {
+				t.Errorf("checkout has with %v; want only persist-credentials: false (base default branch, never a PR ref, no token on disk)", step.With)
 			}
 			checkouts++
 		}
@@ -2707,6 +2705,139 @@ func TestBazelAutofixWorkflowSecurity(t *testing.T) {
 			}
 		}
 	})
+}
+
+// requireWorkflowProducesArtifact: the workflow a workflow_run trigger names
+// runs on pull_request and uploads the artifact the autofix job consumes.
+func requireWorkflowProducesArtifact(t *testing.T, file, name, artifact string) {
+	t.Helper()
+	node := readYAMLNode(t, filepath.Join(".github", "workflows", file))
+	if got := yamlScalar(node, "name"); got != name {
+		t.Errorf("%s name = %q, want %q (the workflow_run trigger names it)", file, got, name)
+	}
+	if !slices.Contains(yamlMapKeys(node, "on"), "pull_request") {
+		t.Errorf("%s has no pull_request trigger; the autofix job only acts on PR runs", file)
+	}
+	var uploads bool
+	for _, job := range readCIWorkflow(t, file).Jobs {
+		for _, step := range job.Steps {
+			if strings.HasPrefix(step.Uses, "actions/upload-artifact@") && step.With["name"] == artifact {
+				uploads = true
+			}
+		}
+	}
+	if !uploads {
+		t.Errorf("%s never uploads %s; the workflow_run trigger on it would be dead", file, artifact)
+	}
+}
+
+// Both autofix workflows push to the same PR branches. Job-level concurrency
+// (skipped runs take no part) in ONE group per head branch, never cancelling:
+// they queue instead of racing, and an unrelated completion cannot cancel a
+// fix in flight.
+func TestAutofixWorkflowsShareConcurrency(t *testing.T) {
+	const group = "autofix-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}"
+	for _, file := range []string{bazelAutofixWorkflowName, "docs-autofix.yml"} {
+		root := readYAMLNode(t, filepath.Join(".github", "workflows", file))
+		if slices.ContainsFunc(root.Content, func(n *yaml.Node) bool { return n.Value == "concurrency" }) {
+			t.Errorf("%s has workflow-level concurrency; it must be on the job so skipped runs take no part", file)
+		}
+		var doc struct {
+			Jobs map[string]struct {
+				Concurrency struct {
+					Group            string `yaml:"group"`
+					CancelInProgress *bool  `yaml:"cancel-in-progress"`
+				} `yaml:"concurrency"`
+				Steps []ciWorkflowStep `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
+		if err := root.Decode(&doc); err != nil {
+			t.Fatal(err)
+		}
+		job, ok := doc.Jobs["autofix"]
+		if !ok || len(doc.Jobs) != 1 {
+			t.Fatalf("%s: want exactly one job, autofix", file)
+		}
+		if job.Concurrency.Group != group {
+			t.Errorf("%s job concurrency group = %q, want %q", file, job.Concurrency.Group, group)
+		}
+		if job.Concurrency.CancelInProgress == nil || *job.Concurrency.CancelInProgress {
+			t.Errorf("%s job concurrency must set cancel-in-progress: false", file)
+		}
+		for _, step := range job.Steps {
+			if strings.HasPrefix(step.Uses, "actions/checkout@") && step.With["persist-credentials"] != "false" {
+				t.Errorf("%s checkout keeps the workflow token in .git/config; set persist-credentials: false", file)
+			}
+		}
+	}
+	requireWorkflowProducesArtifact(t, "pr.yml", "PR", "cli-docs-freshness-patch")
+}
+
+// The two push scripts share their security-critical functions verbatim, and
+// both apply the same hardening.
+func TestAutofixScriptsShareGuards(t *testing.T) {
+	root := sourceRepoRoot(t)
+	bazel := readPolicyFile(t, root, bazelAutofixPushScript)
+	docs := readPolicyFile(t, root, "scripts/docs-autofix-push.sh")
+	for _, name := range []string{"git_", "validate_patch", "check_staged", "post_or_update_comment", "head_branch_protected"} {
+		re := regexp.MustCompile(`(?ms)^` + regexp.QuoteMeta(name) + `\(\) \{\n.*?^\}\n`)
+		a, b := re.FindString(bazel), re.FindString(docs)
+		if a == "" || a != b {
+			t.Errorf("%s() differs between %s and docs-autofix-push.sh (or is missing)", name, bazelAutofixPushScript)
+		}
+	}
+	validator := regexp.MustCompile(`(?ms)^validate_patch\(\) \{\n.*?^\}\n`).FindString(bazel)
+	for _, want := range []string{
+		// Any rename/copy header, including legacy "rename old/new".
+		`rename |copy |`,
+		// Every index line, not only hex ones.
+		`grep -E '^index ' "$file" | grep -qvE '^index [0-9a-f]+\.\.[0-9a-f]+( 100644)?$'`,
+		`git apply --summary "$file"`,
+		`git apply --numstat -z "$file"`,
+	} {
+		if !strings.Contains(validator, want) {
+			t.Errorf("validate_patch lacks %q", want)
+		}
+	}
+	for script, body := range map[string]string{bazelAutofixPushScript: bazel, "scripts/docs-autofix-push.sh": docs} {
+		for _, want := range []string{
+			`select(.user.login == \"$COMMENT_AUTHOR\" and`,
+			`COMMENT_AUTHOR="github-actions[bot]"`,
+			`"--force-with-lease=refs/heads/$HEAD_BRANCH:$HEAD_SHA"`,
+			`gh api "repos/$BASE_REPO/branches/$enc"`,
+			`gh api "repos/$BASE_REPO/rules/branches/$enc"`,
+			`(.base.repo.full_name // "") == $base`,
+			"export GIT_LFS_SKIP_SMUDGE=1",
+			"git -c core.hooksPath=/dev/null",
+			"clone --quiet --bare --filter=blob:none",
+			`git_ read-tree "$HEAD_SHA"`,
+			"apply --cached",
+			`check_staged "$HEAD_SHA"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s lacks %q", script, want)
+			}
+		}
+		// Heredocs hold the human recipe (git apply --index, git push), not
+		// commands this script runs.
+		code := regexp.MustCompile(`(?ms)<<'?EOF'?\n.*?^EOF\n`).ReplaceAllString(body, "")
+		if regexp.MustCompile(`\bgit_?\s+(-c\s+\S+\s+)*(checkout|switch|worktree|restore|reset|stash)\b|apply --index`).MatchString(code) {
+			t.Errorf("%s writes the PR tree to disk; apply to the index only", script)
+		}
+		if strings.Index(code, "if head_branch_protected;") > strings.Index(code, "push --quiet") {
+			t.Errorf("%s must check branch protection before pushing", script)
+		}
+		// Every git command goes through git_ (no hooks), except the
+		// repository-free `git apply --summary/--numstat` of the validator.
+		for _, m := range regexp.MustCompile(`(?m)(?:^\s*|[;&|!(]\s*|\$\(\s*)git\s+(\S+)`).FindAllStringSubmatch(code, -1) {
+			if m[1] != "apply" && m[1] != "-c" {
+				t.Errorf("%s: git %s runs without the git_ wrapper", script, m[1])
+			}
+		}
+		if n, m := strings.Count(code, "git -c "), strings.Count(code, "git -c core.hooksPath=/dev/null "); n != 1 || m != 1 {
+			t.Errorf("%s: want exactly one raw `git -c` call, git_'s core.hooksPath=/dev/null; got %d", script, n)
+		}
+	}
 }
 
 // The producer (PR code) and the consumer (base-branch code) must agree on
