@@ -28,6 +28,9 @@ test:prcore --@rules_go//go/config:race
 test:prcore --test_arg=-test.short
 test:prcore --test_arg=-test.skip=^TestEmbedded
 test:prcore --test_env=BEADS_TEST_SKIP=dolt
+# As in pr.yml's PR Core step: a root or non-POSIX executor fails
+# TestAddExcludePatternsRefusesReadErrors instead of skipping it.
+test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
 test:prcore --test_tag_filters=-requires-docker,-embedded,-manual
 
 test:ci --config=prcore

@@ -885,3 +885,17 @@ func TestBazelrcPrcoreExcludesNonPRTags(t *testing.T) {
 		}
 	}
 }
+
+// TestBazelrcPrcoreRequiresExcludePermission keeps test:prcore in step with
+// pr.yml's PR Core step (TestPRCoreRequiresExcludeReadPermissionCoverage):
+// without the variable, TestAddExcludePatternsRefusesReadErrors skips on a
+// root executor instead of failing.
+func TestBazelrcPrcoreRequiresExcludePermission(t *testing.T) {
+	const want = "test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1"
+	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
+		if strings.TrimSpace(line) == want {
+			return
+		}
+	}
+	t.Fatalf(".bazelrc lacks %q", want)
+}
