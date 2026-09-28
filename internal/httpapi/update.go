@@ -521,8 +521,8 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 	case errors.Is(err, issueops.ErrCloseBlocked):
 		// No `open_children` member, and its ABSENCE is what tells a client
 		// which of the two close-policy refusals it got.
-		s.fail(w, r, named(newResult(CodeNotClosable,
-			"`patch.status` closes a blocked issue; clear the blocker, or send `force_close_policy`"),
+		s.fail(w, r, named(closeBlockedResult(err,
+			"`patch.status` closes a blocked issue", "clear the blocker, or send `force_close_policy`"),
 			patchParam("status")))
 
 	case errors.Is(err, storage.ErrAlreadyClaimed):

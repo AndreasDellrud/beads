@@ -896,6 +896,23 @@ func TestUpdateAnswersThePolicyRefusalsItsMembersEarned(t *testing.T) {
 			},
 		},
 		{
+			name:       "status crossing with a typed live blocker names it",
+			body:       `{"actor":"alice","patch":{"status":"closed"}}`,
+			err:        fmt.Errorf("close: %w", blockedCloseFixture()),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeNotClosable,
+			wantParam:  "patch.status",
+			check: func(t *testing.T, body map[string]any) {
+				assertBlockersMember(t, "problem", body["blockers"])
+				if want := blockedCloseSentence + "; clear the blocker, or send `force_close_policy`"; body["detail"] != want {
+					t.Errorf("detail = %q, want %q", body["detail"], want)
+				}
+				if _, present := body["open_children"]; present {
+					t.Error("open_children is present on the blocker refusal")
+				}
+			},
+		},
+		{
 			name:       "assignee transfer off a live owner",
 			body:       `{"actor":"alice","patch":{"assignee":"carol"}}`,
 			err:        fmt.Errorf("update: %w: issue bd-1 is assigned to %q", storage.ErrAlreadyClaimed, "bob"),
