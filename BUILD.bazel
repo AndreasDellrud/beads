@@ -65,6 +65,24 @@ filegroup(
     visibility = ["//scripts:__pkg__"],
 )
 
+# PR Risk's embedded-Dolt shard scripts and their committed manifests. The
+# embedded variants (//cmd/bd:bd_embedded_test,
+# //internal/storage/embeddeddolt:embeddeddolt_embedded_test) run them through
+# tools/bazel/go_test_manifest_shard.sh, so each Bazel shard runs exactly the
+# tests of the CI job with the same shard number.
+exports_files(
+    [
+        ".github/scripts/embedded-cmd-test-shards.txt",
+        ".github/scripts/embedded-storage-test-shard.sh",
+        ".github/scripts/embedded-storage-test-shards.txt",
+        ".github/scripts/embedded-test-shard.sh",
+    ],
+    visibility = [
+        "//cmd/bd:__pkg__",
+        "//internal/storage/embeddeddolt:__pkg__",
+    ],
+)
+
 # //scripts:scripts_test runs scripts/test.sh, which sources the canonical
 # build flags and reads the known-broken-test skip list.
 filegroup(

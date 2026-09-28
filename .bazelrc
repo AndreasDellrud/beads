@@ -70,6 +70,29 @@ test:docker --test_arg=-test.parallel=4
 # this host: always run them, like the jobs' `go test -count=1`.
 test:docker --nocache_test_results
 
+# Embedded-Dolt tier: PR Risk's embedded jobs ("Test (Embedded Dolt Cmd
+# N/20)", "Test (Embedded Dolt Storage N/5)", "Test (Embedded Dolt
+# Conformance - core/audit)"), as the `embedded`-tagged variants of bd_test
+# and embeddeddolt_test. Race like the jobs' binaries, no -short, no
+# BEADS_TEST_SKIP; each variant sets BEADS_TEST_EMBEDDED_DOLT=1 and the
+# jobs' own -test.timeout. The shard variants run the jobs' shard scripts, so
+# every Bazel shard runs exactly the tests of the job with the same number.
+# Only the variants and what they need are built (the same race configuration
+# as --config=ci, so the two lanes share every compile).
+test:embedded --@rules_go//go/config:race
+test:embedded --test_tag_filters=embedded
+test:embedded --build_tests_only
+test:embedded --keep_going
+test:embedded --test_summary=terse
+# The variants are timeout = "eternal" because the jobs' -test.timeout (20m,
+# 15m, 30m) is past "long"; rbe-west rejects any action timeout over 1200s,
+# so eternal means 1200s here.
+test:embedded --test_timeout=-1,-1,-1,1200
+# The jobs pass no -parallel: GOMAXPROCS on a 4-vCPU runner.
+test:embedded --test_arg=-test.parallel=4
+test:embedded --test_env=GO_TEST_WRAP_TESTV=1
+test:embedded --remote_download_regex=.*/test\.xml$
+
 # Pure-Go lane: pr.yml's "Check pure-Go and js/wasm boundaries
 # (CGO_ENABLED=0)" job. CGO is off for every Go target (rules_go drops
 # cgo-constrained files like go build does; third_party/patches/
