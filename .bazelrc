@@ -65,6 +65,8 @@ test:docker --keep_going
 # -short cmd/bd subset.
 build:pure --@rules_go//go/config:pure
 test:pure --test_arg=-test.short
+# The job passes no -parallel: GOMAXPROCS on a 4-vCPU runner.
+test:pure --test_arg=-test.parallel=4
 test:pure --test_env=GO_TEST_WRAP_TESTV=1
 test:pure --remote_download_regex=.*/test\.xml$
 
