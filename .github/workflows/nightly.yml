@@ -49,7 +49,7 @@ jobs:
   # job below can compare per-test status: a test that passes here and skips
   # under Bazel fails the equivalence check unless allowlisted.
   bazel-go-test-json:
-    name: Bazel equivalence (go test side)
+    name: Bazel equivalence (go-test side)
     if: ${{ github.event_name == 'schedule' || inputs.suite == 'bazel' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -80,13 +80,13 @@ jobs:
           dolt config --global --add user.name "CI Bot"
           dolt config --global --add user.email "ci@beads.test"
 
-      - name: Run PR core go test (JSON)
+      - name: Run PR core go-test (JSON)
         env:
           BEADS_PR_CORE_GO_TEST_JSON: ${{ runner.temp }}/go-test.json
         run: make ci-pr-core
 
       # Uploaded even when tests fail: the status comparison still applies.
-      - name: Upload go test results
+      - name: Upload go-test results
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

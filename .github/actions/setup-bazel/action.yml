@@ -67,4 +67,4 @@ runs:
         printf '%s\n' '#!/usr/bin/env bash' "exec /usr/local/bin/bazelisk --bazelrc=\"$RC\" \"\$@\"" > "$RUNNER_TEMP/bazel-wrapper"
         sudo install -m 755 "$RUNNER_TEMP/bazel-wrapper" /usr/local/bin/bazel
         rm -f "$RUNNER_TEMP/bazel-wrapper"
-        bazel --version
+        /usr/local/bin/bazelisk --version

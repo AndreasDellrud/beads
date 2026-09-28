@@ -71,7 +71,7 @@ on:
       go-test-json-artifact:
         description: >
           Artifact (from the calling run) holding go-test.json, PR Core's
-          `go test -json` on this commit; enables the equivalence skip-parity
+          `go-test -json` on this commit; enables the equivalence skip-parity
           check. nightly.yml sets it.
         type: string
         required: false
@@ -175,7 +175,7 @@ jobs:
             --tier "$TIER" --log "$RUNNER_TEMP/bazel-test.log" "${budget[@]}"
 
       # nightly.yml's PR Core `go test -json` on the same commit.
-      - name: Download go test results
+      - name: Download go-test results
         if: ${{ always() && inputs.go-test-json-artifact != '' && steps.test.outcome != 'skipped' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
