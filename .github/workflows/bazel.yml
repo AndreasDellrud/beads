@@ -278,8 +278,9 @@ jobs:
   # exact pass-count guard.
   bazel-pure:
     name: Bazel / pure-Go and js/wasm (advisory)
-    # Same runner choice as bazel-test (remote execution needs Blacksmith).
+    # Same runner, rbe-west gate and skip rule as bazel-test.
     runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}
     timeout-minutes: 90
     env:
       PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)'
@@ -303,11 +304,11 @@ jobs:
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ (inputs.rbe || 'on') != 'off' && secrets.BAZEL_REMOTE_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_INSTANCE || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && 'oss' || '' }}
 
       - name: Run js/wasm hook boundary
         run: |
@@ -392,8 +393,9 @@ jobs:
   # is named in one variable, so a hermetic dolt-server lane can replace it.
   bazel-docker:
     name: Bazel / docker lane (advisory)
-    # Same runner choice as bazel-test (remote execution needs Blacksmith).
+    # Same runner, rbe-west gate and skip rule as bazel-test.
     runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}
     timeout-minutes: 90
     env:
       BAZEL_DOCKER_LANE: docker
@@ -404,11 +406,11 @@ jobs:
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ (inputs.rbe || 'on') != 'off' && secrets.BAZEL_REMOTE_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_INSTANCE || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && 'oss' || '' }}
 
       # As in the mirrored jobs; tests fail rather than skip without it.
       - name: Pull Dolt sql-server image

@@ -1493,9 +1493,29 @@ func TestBazelWorkflowIsAdvisory(t *testing.T) {
 	// farm admits the Blacksmith pool only; forks (no secrets) and rbe=off
 	// build locally on the GitHub-hosted runner.
 	const wantRunsOn = "${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+	// rbe-west (instance "oss") is switched on by the repo variable
+	// RBE_WEST_WORKERS; until then same-repo runs are skipped and only fork
+	// PRs and rbe=off dispatches run, locally.
+	const wantIf = "${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}"
+	gate := "(inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && "
+	wantSetupEnv := map[string]string{
+		"BAZEL_REMOTE_EXECUTOR": "${{ " + gate + "secrets.RBE_WEST_EXECUTOR || '' }}",
+		"RBE_TLS_CERT":          "${{ " + gate + "secrets.RBE_TLS_CERT || '' }}",
+		"RBE_TLS_KEY":           "${{ " + gate + "secrets.RBE_TLS_KEY || '' }}",
+		"RBE_TLS_CA":            "${{ " + gate + "secrets.RBE_TLS_CA || '' }}",
+		"RBE_INSTANCE":          "${{ " + gate + "'oss' || '' }}",
+	}
 	for name, job := range workflow.Jobs {
 		if job.RunsOn != wantRunsOn {
 			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantRunsOn)
+		}
+		if job.If != wantIf {
+			t.Errorf("%s if = %q, want %q", name, job.If, wantIf)
+		}
+		for _, step := range job.Steps {
+			if step.Uses == "./"+setupBazelActionDir && !reflect.DeepEqual(step.Env, wantSetupEnv) {
+				t.Errorf("%s setup-bazel env = %v, want %v", name, step.Env, wantSetupEnv)
+			}
 		}
 	}
 	for _, name := range []string{"pr.yml", "pr-risk.yml"} {
