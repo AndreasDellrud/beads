@@ -1,7 +1,8 @@
 # Bazel side-by-side lane (advisory). Runs `bazel test //... --config=ci`, the
 # PR Core-parity selection (race, -short, dolt skip, -requires-docker), on the
 # same commit as pr.yml's go test lanes. It is NOT in ci-gate's
-# CI_GATE_REQUIRED; promotion needs a human decision.
+# CI_GATE_REQUIRED; promotion needs the equivalence record described in
+# tools/bazel/equivalence.py and a human decision.
 #
 # Execution mode comes from repo secrets, passed to .github/actions/setup-bazel:
 #   BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT, RBE_TLS_KEY  all set: remote execution
@@ -67,7 +68,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      # Go is for make and the report scripts; Bazel uses its own hermetic SDK.
+      # Go is for tools/bazel/equivalence.py's `go list` and for make; Bazel
+      # uses its own hermetic SDK.
       - name: Set up Go
         id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -138,6 +140,17 @@ jobs:
           if [ "$TIER" != "local" ]; then budget=(--budget "$BAZEL_BUDGET_SECONDS"); fi
           python3 tools/bazel/critpath.py "$RUNNER_TEMP/bazel-profile.json" \
             --tier "$TIER" --log "$RUNNER_TEMP/bazel-test.log" "${budget[@]}"
+
+      # Fails on any Go test that `go test` runs and Bazel did not (tag filter,
+      # manual, missing target, empty shard) unless it is allowlisted.
+      - name: Go test equivalence
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        timeout-minutes: 15
+        env:
+          DETAILS: ${{ inputs.details && '--details' || '' }}
+        run: |
+          # shellcheck disable=SC2086
+          python3 tools/bazel/equivalence.py --bep "$RUNNER_TEMP/bazel-bep.json" $DETAILS
 
       # Runs last: it rewrites BUILD files in the checkout. main moves BUILD
       # inputs (imports, go.mod) without touching Bazel, so drift shows up here

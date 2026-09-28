@@ -26,6 +26,7 @@ on:
           - nix
           - mcp-package
           - npm-package
+          - bazel
       smoke_version:
         description: "Optional previous release for cross-version-smoke"
         required: false
@@ -38,11 +39,21 @@ env:
 jobs:
   measure:
     name: Measure selected CI suite
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.suite != 'full-test' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.suite != 'full-test' && inputs.suite != 'bazel' }}
     uses: ./.github/workflows/ci-measurements.yml
     with:
       suite: ${{ inputs.suite }}
       smoke_version: ${{ inputs.smoke_version }}
+
+  # Bazel lane with the full go test equivalence listing (advisory, like the
+  # PR run). Remote execution when the repo secrets are present.
+  bazel:
+    name: Bazel equivalence (full detail)
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'bazel' }}
+    uses: ./.github/workflows/bazel.yml
+    secrets: inherit
+    with:
+      details: true
 
   full-test:
     name: Full Test Suite

@@ -1,0 +1,10 @@
+# Expected divergences between the Go tests `go test` runs (pr.yml) and the
+# ones `bazel test //... --config=ci` runs, for tools/bazel/equivalence.py.
+#
+# One entry per line, each with a justification:
+#
+#   <package dir> <TestName or glob>   # why Bazel legitimately differs here
+#
+# `*` as the test name covers the whole package, including a package with no
+# go_test target. Keep this list empty unless a difference is deliberate; the
+# checker reports entries that no longer match anything.

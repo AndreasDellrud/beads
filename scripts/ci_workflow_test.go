@@ -1580,7 +1580,7 @@ func TestBazelWorkflowCacheTopology(t *testing.T) {
 }
 
 // The lane runs the committed ci config over //..., reports the critical path
-// even when tests fail, catches BUILD drift, and
+// and the go test equivalence even when tests fail, catches BUILD drift, and
 // hands secrets to nothing but setup-bazel.
 func TestBazelWorkflowRunsCIConfigWithReports(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName)
@@ -1601,6 +1601,7 @@ func TestBazelWorkflowRunsCIConfigWithReports(t *testing.T) {
 	}
 	for name, script := range map[string]string{
 		"Critical-path report": "tools/bazel/critpath.py",
+		"Go test equivalence":  "tools/bazel/equivalence.py",
 	} {
 		step := job.step(t, name)
 		if !strings.Contains(step.Run, script) || !strings.Contains(step.If, "always()") {
