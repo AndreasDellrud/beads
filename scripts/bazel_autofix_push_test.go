@@ -31,12 +31,7 @@ type autofixRepo struct {
 func newAutofixRepo(t *testing.T, files map[string]string, pr func(r *autofixRepo)) *autofixRepo {
 	t.Helper()
 	git := requireHostTool(t, "git")
-	requireHostTool(t, "bash")
-	// The autofix scripts run on Linux runners and use bash 4 associative
-	// arrays; macOS runners ship /bin/bash 3.2.
-	if err := exec.Command("bash", "-c", "declare -A probe=()").Run(); err != nil {
-		t.Skip("bash lacks associative arrays (bash >= 4 required)")
-	}
+	requireAutofixBash(t)
 	r := &autofixRepo{t: t, git: git, dir: t.TempDir()}
 	r.run("init", "-q", "-b", "main")
 	r.run("config", "user.name", "t")
@@ -166,8 +161,20 @@ func writeRawPatch(t *testing.T, body string) string {
 	return file
 }
 
+// requireAutofixBash skips when bash cannot run the autofix scripts: they run
+// on Linux runners and use bash 4 associative arrays, and macOS runners ship
+// /bin/bash 3.2.
+func requireAutofixBash(t *testing.T) {
+	t.Helper()
+	requireHostTool(t, "bash")
+	if err := exec.Command("bash", "-c", "declare -A probe=()").Run(); err != nil {
+		t.Skip("bash lacks associative arrays (bash >= 4 required)")
+	}
+}
+
 func runAutofixCheck(t *testing.T, script, dir, patch string) (string, error) {
 	t.Helper()
+	requireAutofixBash(t)
 	if !filepath.IsAbs(script) {
 		script = filepath.Join(sourceRepoRoot(t), script)
 	}
