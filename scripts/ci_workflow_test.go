@@ -2,6 +2,7 @@ package scripts_test
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1781,14 +1782,16 @@ func TestBazelDoltJobMirrorsContainerJobs(t *testing.T) {
 
 	// The packages those jobs run (test-domain-uow: domain/..., uow,
 	// tracker/... and doctor/fix; contract-corpus: protocol) each need a
-	// dolt-server target; the ones that start dolt servers pick the local
-	// backend and fail closed. Only under go test: scripts_test's runfiles
-	// hold no other package's BUILD.
+	// dolt-server target. Every such target, checked on its own, picks the
+	// local backend and fails closed, so a broken backend fails rather than
+	// skipping into a cached pass; the ones whose TestMain owns a server also
+	// set the package's own REQUIRE switch. Only under go test: scripts_test's
+	// runfiles hold no other package's BUILD.
 	if os.Getenv("TEST_SRCDIR") != "" {
 		return
 	}
 	root := sourceRepoRoot(t)
-	for pkg, dolt := range map[string]bool{
+	for pkg, docker := range map[string]bool{
 		"internal/storage/domain":      false,
 		"internal/storage/domain/db":   true,
 		"internal/storage/domain/fs":   false,
@@ -1800,16 +1803,121 @@ func TestBazelDoltJobMirrorsContainerJobs(t *testing.T) {
 		"cmd/bd/protocol":              true,
 	} {
 		build := readPolicyFile(t, root, pkg+"/BUILD.bazel")
-		if !strings.Contains(build, `tags = ["dolt-server"]`) {
-			t.Errorf("%s/BUILD.bazel has no dolt-server target for the dolt-server lane", pkg)
+		for _, err := range checkDoltServerRules(pkg, build) {
+			t.Error(err)
 		}
-		for _, env := range []string{`"BEADS_TEST_DOLT_SERVER": "local"`, `"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"`} {
-			if dolt && !strings.Contains(build, env) {
-				t.Errorf("%s/BUILD.bazel: the dolt-server target lacks %s", pkg, env)
+		if docker && !strings.Contains(build, `"requires-docker"`) {
+			t.Errorf("%s/BUILD.bazel has no requires-docker variant for the docker A/B lane", pkg)
+		}
+	}
+}
+
+// doltServerRuleEnv is the rule env every dolt-server target must set, and
+// doltServerExtraEnv what particular targets need on top: the TestMain
+// switches that turn a server which cannot start into a failure.
+var (
+	doltServerRuleEnv  = []string{`"BEADS_TEST_DOLT_SERVER": "local"`, `"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"`}
+	doltServerExtraEnv = map[string][]string{
+		"fix_dolt_test":      {`"BEADS_FIX_REQUIRE_DOLT": "1"`},
+		"protocol_dolt_test": {`"BEADS_PROTOCOL_REQUIRE_DOLT": "1"`},
+	}
+	bazelRuleNameRe = regexp.MustCompile(`(?m)^\s*name\s*=\s*"([^"]+)"`)
+)
+
+// bazelTopRules splits a BUILD file into its top-level calls: each starts at
+// a line matching bazelTopRuleRe and ends at the next line that is just ")".
+func bazelTopRules(build string) []string {
+	var rules []string
+	var cur []string
+	in := false
+	for _, line := range strings.Split(build, "\n") {
+		if !in && bazelTopRuleRe.MatchString(line) {
+			in, cur = true, nil
+		}
+		if in {
+			cur = append(cur, line)
+			if line == ")" || (len(cur) == 1 && strings.HasSuffix(strings.TrimSpace(line), ")")) {
+				rules = append(rules, strings.Join(cur, "\n"))
+				in = false
 			}
 		}
-		if dolt && !strings.Contains(build, `"requires-docker"`) {
-			t.Errorf("%s/BUILD.bazel has no requires-docker variant for the docker A/B lane", pkg)
+	}
+	return rules
+}
+
+// checkDoltServerRules checks each rule tagged dolt-server in one package's
+// BUILD file on its own (a file-wide search would accept another target's
+// env), and that the package has at least one.
+func checkDoltServerRules(pkg, build string) []error {
+	var errs []error
+	found := 0
+	for _, rule := range bazelTopRules(stripStarlarkComments(build)) {
+		if !strings.Contains(rule, `"dolt-server"`) {
+			continue
+		}
+		found++
+		name := "?"
+		if m := bazelRuleNameRe.FindStringSubmatch(rule); m != nil {
+			name = m[1]
+		}
+		where := "//" + pkg + ":" + name
+		for _, env := range append(append([]string{}, doltServerRuleEnv...), doltServerExtraEnv[name]...) {
+			if !strings.Contains(rule, env) {
+				errs = append(errs, errors.New(where+" (dolt-server) lacks rule env "+env))
+			}
+		}
+		if strings.Contains(rule, `"no-remote-exec"`) {
+			errs = append(errs, errors.New(where+" (dolt-server) is tagged no-remote-exec; the lane runs on remote workers"))
+		}
+	}
+	if found == 0 {
+		errs = append(errs, errors.New(pkg+"/BUILD.bazel has no dolt-server target for the dolt-server lane"))
+	}
+	return errs
+}
+
+// A dolt-server rule is checked on its own: another target in the same file
+// (the docker variant) carrying the env must not cover for it.
+func TestCheckDoltServerRulesPerTarget(t *testing.T) {
+	const docker = `sh_test(
+    name = "uow_docker_test",
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "container",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    tags = ["requires-docker", "no-remote-exec"],
+)
+`
+	good := `load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+` + docker + `
+# Tags:
+#   dolt-server: lane.
+sh_test(
+    name = "uow_dolt_test",
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    tags = ["dolt-server"],
+)
+`
+	if errs := checkDoltServerRules("p", good); len(errs) != 0 {
+		t.Errorf("good BUILD: %v", errs)
+	}
+	for name, bad := range map[string]string{
+		"no require":      strings.Replace(good, "        \"BEADS_TEST_REQUIRE_DOLT_CONTAINER\": \"1\",\n    },\n    tags = [\"dolt-server\"]", "    },\n    tags = [\"dolt-server\"]", 1),
+		"container":       strings.Replace(good, `"local"`, `"container"`, 1),
+		"no-remote-exec":  strings.Replace(good, `tags = ["dolt-server"]`, `tags = ["dolt-server", "no-remote-exec"]`, 1),
+		"no target":       docker,
+		"fix switch":      strings.Replace(good, `"uow_dolt_test"`, `"fix_dolt_test"`, 1),
+		"protocol switch": strings.Replace(good, `"uow_dolt_test"`, `"protocol_dolt_test"`, 1),
+	} {
+		if bad == good {
+			t.Fatalf("%s: mutation did not apply", name)
+		}
+		if errs := checkDoltServerRules("p", bad); len(errs) == 0 {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }
