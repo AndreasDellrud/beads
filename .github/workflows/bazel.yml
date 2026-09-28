@@ -241,13 +241,23 @@ jobs:
 
       # Runs last: it rewrites BUILD files in the checkout. main moves BUILD
       # inputs (imports, go.mod) without touching Bazel, so drift shows up here
-      # first.
+      # first. On drift the step still fails, and the BUILD.bazel /
+      # MODULE.bazel / MODULE.bazel.lock part of the fix is written as a patch
+      # for the bazel-sync-patch artifact, which bazel-autofix.yml pushes to
+      # same-repo PR branches (or turns into an apply recipe for forks).
       - name: BUILD files in sync (gazelle, go_srcs, MODULE.bazel)
+        id: sync
         if: ${{ always() && steps.bazel.outcome == 'success' }}
         timeout-minutes: 15
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           start=$(date +%s)
-          make bazel-sync-check
+          # A stale go_srcs block is drift like any other: record it, then let
+          # bazel-sync fix it so the patch covers it too.
+          check=0
+          make bazel-sync-check || check=$?
           make bazel-sync
           drift="$(git status --porcelain --untracked-files=all)"
           echo "BUILD sync check: $(( $(date +%s) - start ))s" >> "$GITHUB_STEP_SUMMARY"
@@ -256,8 +266,20 @@ jobs:
             echo "$drift"
             git diff | head -200
             echo "BUILD files **out of sync**; run \`make bazel-sync\` and commit the result." >> "$GITHUB_STEP_SUMMARY"
+            ./scripts/ci/bazel-sync-patch.sh "$RUNNER_TEMP/bazel-sync-patch"
             exit 1
           fi
+          exit "$check"
+
+      # Data only: bazel-autofix.yml validates every path before applying it.
+      - name: Upload BUILD sync patch
+        if: ${{ always() && steps.sync.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bazel-sync-patch
+          path: ${{ runner.temp }}/bazel-sync-patch/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome == 'failure' }}
