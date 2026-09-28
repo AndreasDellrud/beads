@@ -24,12 +24,16 @@ mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp"
 # Dolt identity, as beads_test_env_enter sets with `dolt config --global`:
 # tests that shell out to dolt commit need an author. Written directly so the
 # wrapper does not depend on a dolt binary. The two *.disabled keys stop every
-# dolt command from checking for a newer release and sending usage events:
-# network calls that a hermetic test must not depend on (they change no
-# behavior, only drop a "newer version available" stderr line).
+# dolt command from checking for a newer release and from sending usage
+# events over the network: calls a hermetic test must not depend on (they
+# change no behavior, only drop a "newer version available" stderr line).
+# They do not stop dolt from forking a detached `dolt send-metrics` child on
+# exit, which outlives the command and re-creates $DOLT_ROOT_PATH/.dolt under
+# a test that already removed it; DOLT_DISABLE_EVENT_FLUSH does.
 mkdir -p "$root/dolt-root/.dolt"
 printf '%s\n' '{"user.email":"test@beads.local","user.name":"beads-test","metrics.disabled":"true","versioncheck.disabled":"true"}' \
 	>"$root/dolt-root/.dolt/config_global.json"
+export DOLT_DISABLE_EVENT_FLUSH=1
 
 export HOME="$root/home"
 export USERPROFILE="$root/home"

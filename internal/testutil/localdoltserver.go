@@ -93,6 +93,7 @@ var doltVersionRe = regexp.MustCompile(`(?m)^dolt version (\S+)`)
 // PATH) and checks it is the pinned release.
 func resolveLocalDoltBinary() (string, error) {
 	localDoltBinOnce.Do(func() {
+		sweepDeadLocalServerRoots(localServerBase, processAlive)
 		bin := os.Getenv("BEADS_TEST_DOLT_BINARY")
 		if bin == "" {
 			p, err := exec.LookPath("dolt")
@@ -102,29 +103,12 @@ func resolveLocalDoltBinary() (string, error) {
 			}
 			bin = p
 		}
-		home, err := os.MkdirTemp(localServerBase, "bdt-doltver-")
+		got, err := probeDoltVersion(bin, localServerBase)
 		if err != nil {
 			localDoltBinErr = err
 			return
 		}
-		defer func() { _ = os.RemoveAll(home) }()
-		if err := writeLocalDoltGlobalConfig(home); err != nil {
-			localDoltBinErr = err
-			return
-		}
-		cmd := exec.Command(bin, "version") // #nosec G204 G702 -- test-only; bin is the pinned dolt CLI
-		cmd.Env = []string{"HOME=" + home, "DOLT_ROOT_PATH=" + home, "PATH=" + os.Getenv("PATH")}
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			localDoltBinErr = fmt.Errorf("%s version: %w: %s", bin, err, out)
-			return
-		}
-		m := doltVersionRe.FindSubmatch(out)
-		if m == nil {
-			localDoltBinErr = fmt.Errorf("%s version: unrecognized output %q", bin, out)
-			return
-		}
-		if got := string(m[1]); got != pinnedDoltVersion {
+		if got != pinnedDoltVersion {
 			localDoltBinErr = fmt.Errorf("dolt CLI %s is version %s, want %s (the %s image the container backend runs)",
 				bin, got, pinnedDoltVersion, DoltDockerImage)
 			return
@@ -132,6 +116,37 @@ func resolveLocalDoltBinary() (string, error) {
 		localDoltBin = bin
 	})
 	return localDoltBin, localDoltBinErr
+}
+
+// doltNoEventFlushEnv stops every dolt command from forking a detached
+// `dolt send-metrics` child on exit. The *.disabled config keys below stop
+// the network calls but not that child, which outlives its parent, re-creates
+// <HOME>/.dolt after the owner removed it, and races terminate's RemoveAll.
+const doltNoEventFlushEnv = "DOLT_DISABLE_EVENT_FLUSH=1"
+
+// probeDoltVersion runs `bin version` with a throwaway HOME under base (so
+// the user's ~/.dolt is neither read nor written) and returns the version.
+func probeDoltVersion(bin, base string) (string, error) {
+	home, err := os.MkdirTemp(base, "bdt-doltver-")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(home) }()
+	_ = writeLocalRootOwner(home)
+	if err := writeLocalDoltGlobalConfig(home); err != nil {
+		return "", err
+	}
+	cmd := exec.Command(bin, "version") // #nosec G204 G702 -- test-only; bin is the pinned dolt CLI
+	cmd.Env = []string{"HOME=" + home, "DOLT_ROOT_PATH=" + home, "PATH=" + os.Getenv("PATH"), doltNoEventFlushEnv}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s version: %w: %s", bin, err, out)
+	}
+	m := doltVersionRe.FindSubmatch(out)
+	if m == nil {
+		return "", fmt.Errorf("%s version: unrecognized output %q", bin, out)
+	}
+	return string(m[1]), nil
 }
 
 // writeLocalDoltGlobalConfig writes the server's dolt global config. The
@@ -149,7 +164,7 @@ func writeLocalDoltGlobalConfig(root string) error {
 // localDoltServer is one `dolt sql-server` owned by this test process.
 type localDoltServer struct {
 	bin     string
-	root    string // owned tree: data/, home/, server.log
+	root    string // owned tree: data/, home/, sfp/, server.yaml, server.log, owner.pid
 	dataDir string
 	logPath string
 
@@ -191,7 +206,8 @@ func startLocalDoltServer() (*localDoltServer, error) {
 
 // newLocalDoltServer creates the state tree of a server that is not started
 // yet: data/ (the server's working directory, a multi-database root like the
-// image's /var/lib/dolt), home/ (its HOME and DOLT_ROOT_PATH) and server.log.
+// image's /var/lib/dolt), home/ (its HOME and DOLT_ROOT_PATH), sfp/ (its
+// secure_file_priv), server.log and the owner marker.
 func newLocalDoltServer() (*localDoltServer, error) {
 	bin, err := resolveLocalDoltBinary()
 	if err != nil {
@@ -207,9 +223,15 @@ func newLocalDoltServer() (*localDoltServer, error) {
 		dataDir: filepath.Join(root, "data"),
 		logPath: filepath.Join(root, "server.log"),
 	}
-	if err := os.MkdirAll(s.dataDir, 0o700); err != nil {
+	if err := writeLocalRootOwner(root); err != nil {
 		_ = os.RemoveAll(root)
 		return nil, err
+	}
+	for _, d := range []string{s.dataDir, s.secureFilePrivDir()} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			_ = os.RemoveAll(root)
+			return nil, err
+		}
 	}
 	if err := writeLocalDoltGlobalConfig(filepath.Join(root, "home")); err != nil {
 		_ = os.RemoveAll(root)
@@ -261,8 +283,13 @@ func (s *localDoltServer) launch(port int) error {
 		gomaxprocs = defaultLocalServerGOMAXPROCS
 	}
 	home := filepath.Join(s.root, "home")
+	cfg, err := s.writeServerConfig(port)
+	if err != nil {
+		_ = logf.Close()
+		return err
+	}
 	// #nosec G204 -- test-only, pinned binary, loopback listener
-	cmd := exec.Command(s.bin, "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port))
+	cmd := exec.Command(s.bin, "sql-server", "--config", cfg)
 	cmd.Dir = s.dataDir
 	// A clean environment, like the container's: nothing from the test
 	// (BEADS_*, DOLT_* overrides, the wrapper's dolt identity) reaches the
@@ -275,6 +302,7 @@ func (s *localDoltServer) launch(port int) error {
 		"DOLT_ROOT_HOST=%",
 		"TZ=UTC",
 		"GOMAXPROCS=" + gomaxprocs,
+		doltNoEventFlushEnv,
 	}
 	cmd.Stdout = logf
 	cmd.Stderr = logf
@@ -304,6 +332,24 @@ func (s *localDoltServer) launch(port int) error {
 		return err
 	}
 	return nil
+}
+
+func (s *localDoltServer) secureFilePrivDir() string { return filepath.Join(s.root, "sfp") }
+
+// writeServerConfig writes the server's --config file for port. dolt ignores
+// every other flag when --config is given, so it carries the listener too.
+// Its only other setting is secure_file_priv: the image runs with "" (any
+// path), which inside a container reaches only the container's filesystem,
+// but a local server runs as the test user on the host, where passwordless
+// root@% plus LOAD_FILE / INTO OUTFILE would read and write the user's
+// files from any process that can reach the port. Confining it to sfp/ is the
+// one deliberate difference from the container (TestDoltServerFingerprint
+// normalizes it).
+func (s *localDoltServer) writeServerConfig(port int) (string, error) {
+	path := filepath.Join(s.root, "server.yaml")
+	cfg := fmt.Sprintf("listener:\n  host: 127.0.0.1\n  port: %d\nsystem_variables:\n  secure_file_priv: %s\n",
+		port, strconv.Quote(s.secureFilePrivDir()))
+	return path, os.WriteFile(path, []byte(cfg), 0o600)
 }
 
 // localServerReadyLine is what dolt sql-server logs once its listener is
@@ -480,4 +526,77 @@ func (s *localDoltServer) execInDataDir(ctx context.Context, argv []string) (int
 		return 0, "", err
 	}
 	return 0, string(out), nil
+}
+
+// Local state roots are removed by terminate, but nothing runs it when the
+// test binary dies (panic, -timeout, SIGKILL) or when a package's TestMain
+// never calls TerminateDoltContainer: the container backend has Ryuk for
+// that, the local backend has these. Every root records its owning PID, and
+// the first use of the backend in a later process removes the roots whose
+// owner is gone (the doltserver.SweepDeadSuiteRoots rule, copied because
+// doltserver's own tests import this package).
+const (
+	localRootOwnerFile   = "owner.pid"
+	localServerRootGlob  = "bdt-dolt-*"
+	localVersionRootGlob = "bdt-doltver-*"
+)
+
+func writeLocalRootOwner(root string) error {
+	return os.WriteFile(filepath.Join(root, localRootOwnerFile), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+}
+
+// readLocalRootOwner returns the PID in root's owner marker; ok is false
+// when there is none or it does not hold a PID, which means "owner unknown",
+// never "owner dead".
+func readLocalRootOwner(root string) (pid int, ok bool) {
+	b, err := os.ReadFile(filepath.Join(root, localRootOwnerFile)) // #nosec G304 -- fixed name under a root this user owns
+	if err != nil {
+		return 0, false
+	}
+	pid, err = strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// processAlive reports whether pid names a running process (EPERM: it
+// exists but belongs to someone else, so it is alive too).
+func processAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// sweepDeadLocalServerRoots removes base's local-backend state roots whose
+// owner marker names a dead process and returns them. A root without a
+// marker (a pre-marker leftover, or one whose owner is still between
+// MkdirTemp and writing it), with a live owner, not a real directory, or not
+// owned by this user is left alone. Only directories are reclaimed: on
+// Linux Pdeathsig already killed the dead owner's servers; elsewhere a
+// surviving server keeps serving its deleted directory until it is killed.
+func sweepDeadLocalServerRoots(base string, alive func(int) bool) []string {
+	var swept []string
+	for _, glob := range []string{localServerRootGlob, localVersionRootGlob} {
+		matches, _ := filepath.Glob(filepath.Join(base, glob))
+		for _, root := range matches {
+			info, err := os.Lstat(root)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+				continue
+			}
+			pid, ok := readLocalRootOwner(root)
+			if !ok || alive(pid) {
+				continue
+			}
+			if os.RemoveAll(root) == nil {
+				swept = append(swept, root)
+			}
+		}
+	}
+	if len(swept) > 0 && os.Getenv(EnvDoltServerVerbose) == "1" {
+		fmt.Fprintf(os.Stderr, "testutil: removed %d local dolt server state dir(s) of dead test processes: %v\n", len(swept), swept)
+	}
+	return swept
 }

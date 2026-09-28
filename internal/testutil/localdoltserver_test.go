@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,7 +35,15 @@ type serverFingerprint struct {
 	SystemTZ     string
 	TimeZone     string
 	Autocommit   string
-	SecureFilePv string
+	SecureFilePv string // normalized, see fingerprintServer
+	CharsetSrv   string
+	CollationSrv string
+	MaxPacket    string
+	TxIsolation  string
+	LowerCaseTbl string
+	LowerCaseFS  string // normalized off Linux, see fingerprintServer
+	WaitTimeout  string
+	LockWait     string // innodb_lock_wait_timeout
 }
 
 var wantServerFingerprint = serverFingerprint{
@@ -57,6 +66,14 @@ var wantServerFingerprint = serverFingerprint{
 	TimeZone:     "SYSTEM",
 	Autocommit:   "1",
 	SecureFilePv: "",
+	CharsetSrv:   "utf8mb4",
+	CollationSrv: "utf8mb4_0900_bin",
+	MaxPacket:    "1073741824",
+	TxIsolation:  "REPEATABLE-READ",
+	LowerCaseTbl: "0",
+	LowerCaseFS:  "0",
+	WaitTimeout:  "28800",
+	LockWait:     "1",
 }
 
 func queryStrings(ctx context.Context, db *sql.DB, q string) ([]string, error) {
@@ -76,7 +93,12 @@ func queryStrings(ctx context.Context, db *sql.DB, q string) ([]string, error) {
 	return out, rows.Err()
 }
 
-func fingerprintServer(t *testing.T, port string) serverFingerprint {
+// fingerprintServer reads the fingerprint of the server on port. secureDir
+// is the secure_file_priv the backend sets on purpose: the container's is ""
+// (it can only reach the container's own filesystem), the local backend's is
+// its state root's sfp/ (it runs on the host; see writeServerConfig). That
+// value is reported as "" so both backends compare against one fingerprint.
+func fingerprintServer(t *testing.T, port, secureDir string) serverFingerprint {
 	t.Helper()
 	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port))
 	if err != nil {
@@ -99,13 +121,26 @@ func fingerprintServer(t *testing.T, port string) serverFingerprint {
 	fp.Databases = must(queryStrings(ctx, db, "SHOW DATABASES"))
 	sort.Strings(fp.Databases)
 	row := db.QueryRowContext(ctx, "SELECT CURRENT_USER(), @@version, @@max_connections, @@sql_mode, "+
-		"@@system_time_zone, @@time_zone, @@autocommit, @@secure_file_priv")
+		"@@system_time_zone, @@time_zone, @@autocommit, @@secure_file_priv, "+
+		"@@character_set_server, @@collation_server, @@max_allowed_packet, @@transaction_isolation, "+
+		"@@lower_case_table_names, @@lower_case_file_system, @@wait_timeout, @@innodb_lock_wait_timeout")
 	var secure sql.NullString
 	if err := row.Scan(&fp.CurrentUser, &fp.Version, &fp.MaxConns, &fp.SQLMode,
-		&fp.SystemTZ, &fp.TimeZone, &fp.Autocommit, &secure); err != nil {
+		&fp.SystemTZ, &fp.TimeZone, &fp.Autocommit, &secure,
+		&fp.CharsetSrv, &fp.CollationSrv, &fp.MaxPacket, &fp.TxIsolation,
+		&fp.LowerCaseTbl, &fp.LowerCaseFS, &fp.WaitTimeout, &fp.LockWait); err != nil {
 		t.Fatalf("server variables: %v", err)
 	}
 	fp.SecureFilePv = secure.String
+	if secureDir != "" && filepath.Clean(fp.SecureFilePv) == filepath.Clean(secureDir) {
+		fp.SecureFilePv = ""
+	}
+	// lower_case_file_system describes the filesystem under the data
+	// directory: the container's is Linux, a local server on macOS sits on
+	// case-insensitive APFS and reports ON. Only Linux hosts compare it.
+	if runtime.GOOS != "linux" {
+		fp.LowerCaseFS = wantServerFingerprint.LowerCaseFS
+	}
 	return fp
 }
 
@@ -136,10 +171,11 @@ func TestDoltServerFingerprint(t *testing.T) {
 			t.Skipf("container backend not available on this host (docker + %s)", DoltDockerImage)
 		}
 		c := startIsolatedDoltContainer(t)
-		checkFingerprint(t, fingerprintServer(t, c.Port))
+		checkFingerprint(t, fingerprintServer(t, c.Port, ""))
 	})
 
 	t.Run("local", func(t *testing.T) {
+		skipLocalServerOffLinuxUnlessSelected(t)
 		if selectedLocal {
 			if state := checkDolt(); state != doltReady {
 				skipOrFailDoltUnavailable(t, state)
@@ -148,8 +184,21 @@ func TestDoltServerFingerprint(t *testing.T) {
 			t.Skipf("local backend not available on this host: %v", err)
 		}
 		c := startIsolatedLocalDoltServer(t)
-		checkFingerprint(t, fingerprintServer(t, c.Port))
+		checkFingerprint(t, fingerprintServer(t, c.Port, c.local.secureFilePrivDir()))
 	})
+}
+
+// skipLocalServerOffLinuxUnlessSelected keeps the local backend's own tests
+// off non-Linux hosts unless BEADS_TEST_DOLT_SERVER=local asks for them. The
+// macOS CI lanes run `go test -short ./...` with the pinned dolt installed;
+// without Pdeathsig (Linux only) a test binary killed mid-test there would
+// orphan its servers on the runner, and the backend is validated on Linux.
+func skipLocalServerOffLinuxUnlessSelected(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && !useLocalDoltServer() {
+		t.Skipf("skipping local dolt sql-server test on %s (no Pdeathsig); set %s=local to run it",
+			runtime.GOOS, EnvDoltServerBackend)
+	}
 }
 
 // requireLocalDoltCLI skips (or, under BEADS_TEST_REQUIRE_DOLT_CONTAINER=1,
@@ -157,6 +206,7 @@ func TestDoltServerFingerprint(t *testing.T) {
 // missing. These tests run whichever backend is selected.
 func requireLocalDoltCLI(t *testing.T) {
 	t.Helper()
+	skipLocalServerOffLinuxUnlessSelected(t)
 	if hasTestSkip("dolt") {
 		t.Skip("skipping: Dolt tests skipped (BEADS_TEST_SKIP=dolt)")
 	}
@@ -166,10 +216,6 @@ func requireLocalDoltCLI(t *testing.T) {
 		}
 		t.Skipf("local Dolt CLI unavailable: %v", err)
 	}
-}
-
-func processAlive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
 }
 
 func TestLocalDoltServer_BindRaceRetriesOnAnotherPort(t *testing.T) {
@@ -385,6 +431,133 @@ func TestLocalDoltServer_TerminateLeavesNothing(t *testing.T) {
 	}
 	if err := pingDoltOnce(fmt.Sprintf("root@tcp(127.0.0.1:%d)/", s.Port())); err == nil {
 		t.Errorf("something still answers on port %d", s.Port())
+	}
+	// A detached `dolt send-metrics` child of the exiting server would
+	// re-create <root>/home/.dolt a few hundred ms later.
+	time.Sleep(time.Second)
+	if _, err := os.Stat(s.root); !os.IsNotExist(err) {
+		t.Errorf("state dir %s re-created after terminate (dolt child outlived the server?): %v", s.root, err)
+	}
+}
+
+// The version probe's throwaway HOME must be gone for good once it returns.
+func TestLocalDoltServer_VersionProbeLeavesNothing(t *testing.T) {
+	requireLocalDoltCLI(t)
+	bin, _ := resolveLocalDoltBinary()
+	base := t.TempDir()
+	if _, err := probeDoltVersion(bin, base); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Second)
+	if ents, _ := os.ReadDir(base); len(ents) != 0 {
+		t.Errorf("dolt version left %d entries in %s (dolt child outlived it?): %v", len(ents), base, ents)
+	}
+}
+
+// Only files under the server's own sfp/ directory are reachable through
+// LOAD_FILE and SELECT ... INTO OUTFILE: a local server runs as the test user
+// on the host, with a passwordless root@%.
+func TestLocalDoltServer_SecureFilePriv(t *testing.T) {
+	requireLocalDoltCLI(t)
+	c := startIsolatedLocalDoltServer(t)
+	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/", c.Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT LOAD_FILE(?)", outside).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Valid {
+		t.Errorf("LOAD_FILE(%s) outside secure_file_priv = %q, want NULL", outside, got.String)
+	}
+	written := filepath.Join(filepath.Dir(outside), "written")
+	if _, err := db.ExecContext(ctx, "SELECT 1 INTO OUTFILE '"+written+"'"); err == nil {
+		t.Errorf("SELECT ... INTO OUTFILE %s outside secure_file_priv succeeded", written)
+	}
+	if _, err := os.Stat(written); !os.IsNotExist(err) {
+		t.Errorf("INTO OUTFILE created %s: %v", written, err)
+	}
+
+	inside := filepath.Join(c.local.secureFilePrivDir(), "ok")
+	if err := os.WriteFile(inside, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT LOAD_FILE(?)", inside).Scan(&got); err != nil || got.String != "ok" {
+		t.Errorf("LOAD_FILE inside secure_file_priv = %q, %v; want \"ok\"", got.String, err)
+	}
+}
+
+func TestSweepDeadLocalServerRoots(t *testing.T) {
+	base := t.TempDir()
+	const livePID, deadPID = 1001, 1002
+	mk := func(name, marker string) string {
+		t.Helper()
+		p := filepath.Join(base, name)
+		if err := os.MkdirAll(filepath.Join(p, "data", "beads_test"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if marker != "" {
+			if err := os.WriteFile(filepath.Join(p, localRootOwnerFile), []byte(marker), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return p
+	}
+	deadServer := mk("bdt-dolt-1", strconv.Itoa(deadPID)+"\n")
+	deadVersion := mk("bdt-doltver-1", strconv.Itoa(deadPID))
+	live := mk("bdt-dolt-2", strconv.Itoa(livePID))
+	noMarker := mk("bdt-dolt-3", "")
+	garbage := mk("bdt-dolt-4", "not a pid")
+	foreign := mk("other-dolt-1", strconv.Itoa(deadPID))
+	target := mk("target", strconv.Itoa(deadPID))
+	link := filepath.Join(base, "bdt-dolt-5")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	alive := func(pid int) bool { return pid == livePID }
+	swept := sweepDeadLocalServerRoots(base, alive)
+	sort.Strings(swept)
+	want := []string{deadServer, deadVersion}
+	if fmt.Sprint(swept) != fmt.Sprint(want) {
+		t.Errorf("swept %v, want %v", swept, want)
+	}
+	for _, p := range want {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s not removed: %v", p, err)
+		}
+	}
+	for _, p := range []string{live, noMarker, garbage, foreign, target, link} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s must be left alone: %v", p, err)
+		}
+	}
+	if got := sweepDeadLocalServerRoots(base, alive); len(got) != 0 {
+		t.Errorf("second sweep removed %v", got)
+	}
+}
+
+func TestLocalRootOwnerMarker(t *testing.T) {
+	root := t.TempDir()
+	if _, ok := readLocalRootOwner(root); ok {
+		t.Fatal("marker reported in an empty root")
+	}
+	if err := writeLocalRootOwner(root); err != nil {
+		t.Fatal(err)
+	}
+	if pid, ok := readLocalRootOwner(root); !ok || pid != os.Getpid() {
+		t.Errorf("readLocalRootOwner = %d, %v; want %d, true", pid, ok, os.Getpid())
+	}
+	if !processAlive(os.Getpid()) {
+		t.Error("processAlive(self) = false")
 	}
 }
 
