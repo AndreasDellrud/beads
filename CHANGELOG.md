@@ -96,8 +96,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach the database another way still need the `bd doctor` /
   `bd recompute-blocked` repair they needed before: `bd batch` (on both its
   plain and its proxied transaction), `bd cook`, `bd mol squash`,
-  `bd mol burn`, `bd duplicates --merge`, and the wisp writes — closes,
-  updates, deletes and demote-to-wisp.
+  `bd mol burn`, `bd duplicates --merge`, the wisp writes — closes, updates,
+  deletes and demote-to-wisp — and every write served through the
+  proxied-server (uow/domain-db) route, which under `--proxied-server` is the
+  ordinary single verbs as well: `bd close`, `bd update`, `bd delete` and
+  `bd dep remove`.
 
 
 - **`bd list --watch --format` is refused instead of silently dropping the
