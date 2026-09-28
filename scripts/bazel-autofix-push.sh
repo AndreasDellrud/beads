@@ -197,44 +197,46 @@ fi
 
 validate_patch "$PATCH_FILE"
 
-# The metadata can only veto: a patch built for another head is not ours.
+# The metadata can only veto or narrow: a patch built for another head is not
+# ours, and its PR number only picks among PRs that already match the event.
+META_PR=""
 if [ -n "${META_FILE:-}" ] && [ -f "$META_FILE" ]; then
     meta_sha="$(sed -n 's/^head_sha=\([0-9a-f]\{40\}\)$/\1/p' "$META_FILE" | head -1)"
     if [ -n "$meta_sha" ] && [ "$meta_sha" != "$HEAD_SHA" ]; then
         echo "Patch was built for head $meta_sha, not $HEAD_SHA; skipping."
         exit 0
     fi
+    META_PR="$(sed -n 's/^pr=\([1-9][0-9]\{0,9\}\)$/\1/p' "$META_FILE" | head -1)"
 fi
 
 # --- Resolve the PR and confirm the patch is still current -------------------
 
 # List-and-filter client side: branch names with URL metacharacters would
 # corrupt a ?head= query string, and jq --arg needs no encoding. The PR must
-# target this repository.
+# target this repository. One head branch can back several open PRs (into
+# different bases): the metadata's PR number picks among them, and without
+# it an ambiguous match is skipped rather than guessed.
 PULLS_JSON="$(gh api --paginate "repos/$BASE_REPO/pulls?state=open&per_page=100")"
-PR_MATCH="$(printf '%s' "$PULLS_JSON" | jq -r -s --arg repo "$HEAD_REPO" --arg branch "$HEAD_BRANCH" --arg base "$BASE_REPO" \
+PR_MATCH="$(printf '%s' "$PULLS_JSON" | jq -r -s --arg repo "$HEAD_REPO" --arg branch "$HEAD_BRANCH" --arg base "$BASE_REPO" --arg pr "$META_PR" \
     'add | [ .[] | select(.head.ref == $branch and (.head.repo.full_name // "") == $repo
-                          and (.base.repo.full_name // "") == $base) ]
-     | .[0] | if . == null then "" else "\(.number)\t\(.head.sha)\t\(.base.ref)" end')"
-IFS=$'\t' read -r PR_NUMBER PR_HEAD_NOW PR_BASE_REF <<<"$PR_MATCH"
-
-if [ -z "$PR_NUMBER" ]; then
-    echo "No open PR for $HEAD_REPO:$HEAD_BRANCH into $BASE_REPO; nothing to do."
-    exit 0
-fi
+                          and (.base.repo.full_name // "") == $base)
+                 | select($pr == "" or (.number | tostring) == $pr) ]
+     | if length == 1 then .[0] | "\(.number)\t\(.head.sha)\t\(.base.ref)" else "\(length)" end')"
+case "$PR_MATCH" in
+    0)
+        echo "No open PR for $HEAD_REPO:$HEAD_BRANCH into $BASE_REPO${META_PR:+ numbered #$META_PR}; nothing to do."
+        exit 0
+        ;;
+    *$'\t'*) IFS=$'\t' read -r PR_NUMBER PR_HEAD_NOW PR_BASE_REF <<<"$PR_MATCH" ;;
+    *)
+        echo "$PR_MATCH open PRs use $HEAD_REPO:$HEAD_BRANCH and the patch names none of them; not guessing."
+        exit 0
+        ;;
+esac
 if [ "$PR_HEAD_NOW" != "$HEAD_SHA" ]; then
     echo "PR #$PR_NUMBER head moved ($HEAD_SHA -> $PR_HEAD_NOW); a newer run owns the fix."
     exit 0
 fi
-
-# Circuit breaker: if the failing head is already one of our autofix commits,
-# the sync is not converging - stacking more bot commits would loop. Fail safe
-# to the recipe comment.
-HEAD_MSG="$(gh api "repos/$BASE_REPO/commits/$HEAD_SHA" --jq '.commit.message' 2>/dev/null || true)"
-case "$HEAD_MSG" in
-    "$AUTOFIX_SUBJECT"*) NONCONVERGENT=1 ;;
-    *) NONCONVERGENT=0 ;;
-esac
 
 # post_or_update_comment BODY_FILE: edit our own marker comment, else post.
 # Shared verbatim with docs-autofix-push.sh.
@@ -298,12 +300,6 @@ EOF
     rm -f "$body"
 }
 
-if [ "$NONCONVERGENT" = "1" ]; then
-    echo "Head $HEAD_SHA is already an autofix commit; refusing to stack another."
-    comment_fallback "an earlier auto-fix did not converge - please run make bazel-sync"
-    exit 0
-fi
-
 # --- Fork PRs: no token we hold can push there, leave the recipe --------------
 
 if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
@@ -330,10 +326,14 @@ trap 'rm -rf "$WORK"' EXIT
 # symlink, .gitattributes or hook from it touches the disk.
 export GIT_INDEX_FILE="$WORK/index"
 
-git_ -c "$AUTH_CONFIG" clone --quiet --bare --filter=blob:none \
-    "https://github.com/${BASE_REPO}.git" "$WORK/repo.git"
+# Only the two branches this run needs, blobs on demand: other branches'
+# history never reaches the runner.
+git_ init --quiet --bare "$WORK/repo.git"
 cd "$WORK/repo.git"
-git_ -c "$AUTH_CONFIG" fetch --quiet origin \
+git_ remote add origin "https://github.com/${BASE_REPO}.git"
+git_ config remote.origin.promisor true
+git_ config remote.origin.partialclonefilter blob:none
+git_ -c "$AUTH_CONFIG" fetch --quiet --no-tags --filter=blob:none origin \
     "+refs/heads/$HEAD_BRANCH:refs/autofix/head" "+refs/heads/$PR_BASE_REF:refs/autofix/base"
 if ! git_ cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
     echo "Head $HEAD_SHA no longer reachable on $BASE_REPO/$HEAD_BRANCH; skipping."
@@ -344,7 +344,8 @@ fi
 # patch also carries any drift main has. Only files the PR's own changes
 # (merge-base..head) can explain are pushed:
 #   * D/BUILD.bazel when the PR changed a file whose nearest package (the
-#     closest directory with a BUILD.bazel) is D;
+#     closest directory with a BUILD.bazel) is D; for the root package only
+#     root-level Go/build inputs count, not every path outside a package;
 #   * MODULE.bazel / MODULE.bazel.lock when it changed go.mod, go.sum or either
 #     MODULE file;
 #   * everything when it changed the sync tooling (tools/bazel/, root BUILD.bazel).
@@ -374,6 +375,16 @@ while IFS= read -r -d '' path; do
     esac
     dir="$(dirname -- "$path")"
     while [ -z "${PKG_DIRS[$dir]:-}" ]; do dir="$(dirname -- "$dir")"; done
+    # The walk ends at the root for every path outside a package (docs/,
+    # .github/, README.md, ...); only the root's own Go and build inputs
+    # can change what gazelle writes to the root BUILD.bazel.
+    if [ "$dir" = . ]; then
+        case "$path" in
+            */*) continue ;;
+            *.go | *.s | *.c | *.h | *.bzl | go.mod | go.sum | BUILD.bazel | MODULE.bazel | MODULE.bazel.lock) ;;
+            *) continue ;;
+        esac
+    fi
     PR_PKGS["$dir"]=1
 done < <(git_ diff --name-only --no-renames -z "$MERGE_BASE" "$HEAD_SHA")
 
@@ -422,6 +433,16 @@ for path in "${STAGED_PATHS[@]}"; do
 done
 if [ "${#STAGED_PATHS[@]}" -eq 0 ]; then
     echo "Patch changes nothing on $HEAD_SHA; nothing to push."
+    exit 0
+fi
+
+# Circuit breaker, once the PR's own fix is known to be non-empty: if the
+# failing head is already one of our autofix commits, the sync is not
+# converging - stacking more bot commits would loop. Read from the fetched
+# commit (no API); failing to read it counts as non-convergent.
+if ! HEAD_SUBJECT="$(git_ log -1 --format=%s "$HEAD_SHA")" || [[ "$HEAD_SUBJECT" == "$AUTOFIX_SUBJECT"* ]]; then
+    echo "Head $HEAD_SHA is (or may be) an autofix commit; refusing to stack another."
+    cd / && comment_fallback "the previous auto-fix commit did not fix this PR's own files - please run make bazel-sync on the branch and commit the result"
     exit 0
 fi
 

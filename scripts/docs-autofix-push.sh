@@ -195,34 +195,29 @@ validate_patch "$PATCH_FILE"
 
 # List-and-filter client side: branch names with URL metacharacters would
 # corrupt a ?head= query string, and jq --arg needs no encoding. The PR must
-# target this repository.
+# target this repository. One head branch can back several open PRs (into
+# different bases); this artifact names no PR, so an ambiguous match is
+# skipped rather than guessed.
 PULLS_JSON="$(gh api --paginate "repos/$BASE_REPO/pulls?state=open&per_page=100")"
 PR_MATCH="$(printf '%s' "$PULLS_JSON" | jq -r -s --arg repo "$HEAD_REPO" --arg branch "$HEAD_BRANCH" --arg base "$BASE_REPO" \
     'add | [ .[] | select(.head.ref == $branch and (.head.repo.full_name // "") == $repo
                           and (.base.repo.full_name // "") == $base) ]
-     | .[0] | if . == null then "" else "\(.number)\t\(.head.sha)" end')"
-IFS=$'\t' read -r PR_NUMBER PR_HEAD_NOW <<<"$PR_MATCH"
-
-if [ -z "$PR_NUMBER" ]; then
-    echo "No open PR for $HEAD_REPO:$HEAD_BRANCH into $BASE_REPO; nothing to do."
-    exit 0
-fi
+     | if length == 1 then .[0] | "\(.number)\t\(.head.sha)" else "\(length)" end')"
+case "$PR_MATCH" in
+    0)
+        echo "No open PR for $HEAD_REPO:$HEAD_BRANCH into $BASE_REPO; nothing to do."
+        exit 0
+        ;;
+    *$'\t'*) IFS=$'\t' read -r PR_NUMBER PR_HEAD_NOW <<<"$PR_MATCH" ;;
+    *)
+        echo "$PR_MATCH open PRs use $HEAD_REPO:$HEAD_BRANCH; not guessing which one this patch is for."
+        exit 0
+        ;;
+esac
 if [ "$PR_HEAD_NOW" != "$HEAD_SHA" ]; then
     echo "PR #$PR_NUMBER head moved ($HEAD_SHA -> $PR_HEAD_NOW); a newer run owns the fix."
     exit 0
 fi
-
-# Circuit breaker: if the failing head is already one of our autofix commits,
-# regeneration is not converging (or something keeps dirtying the docs) -
-# stacking more bot commits would loop. Fail safe to the recipe comment.
-HEAD_MSG="$(gh api "repos/$BASE_REPO/commits/$HEAD_SHA" --jq '.commit.message' 2>/dev/null || true)"
-case "$HEAD_MSG" in
-    "$AUTOFIX_SUBJECT"*)
-        echo "Head $HEAD_SHA is already an autofix commit; refusing to stack another."
-        NONCONVERGENT=1
-        ;;
-    *) NONCONVERGENT=0 ;;
-esac
 
 # post_or_update_comment BODY_FILE: edit our own marker comment, else post.
 # Shared verbatim with bazel-autofix-push.sh.
@@ -286,11 +281,6 @@ EOF
     rm -f "$body"
 }
 
-if [ "$NONCONVERGENT" = "1" ]; then
-    comment_fallback "an earlier auto-fix did not converge - please regenerate manually"
-    exit 0
-fi
-
 # --- Fork PRs: no token we hold can push there, leave the recipe --------------
 
 if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
@@ -317,10 +307,15 @@ trap 'rm -rf "$WORK"' EXIT
 # symlink, .gitattributes or hook from it touches the disk.
 export GIT_INDEX_FILE="$WORK/index"
 
-git_ -c "$AUTH_CONFIG" clone --quiet --bare --filter=blob:none \
-    "https://github.com/${BASE_REPO}.git" "$WORK/repo.git"
+# Only the head branch, blobs on demand: other branches' history never
+# reaches the runner.
+git_ init --quiet --bare "$WORK/repo.git"
 cd "$WORK/repo.git"
-git_ -c "$AUTH_CONFIG" fetch --quiet origin "+refs/heads/$HEAD_BRANCH:refs/autofix/head"
+git_ remote add origin "https://github.com/${BASE_REPO}.git"
+git_ config remote.origin.promisor true
+git_ config remote.origin.partialclonefilter blob:none
+git_ -c "$AUTH_CONFIG" fetch --quiet --no-tags --filter=blob:none origin \
+    "+refs/heads/$HEAD_BRANCH:refs/autofix/head"
 if ! git_ cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
     echo "Head $HEAD_SHA no longer reachable on $BASE_REPO/$HEAD_BRANCH; skipping."
     exit 0
@@ -337,6 +332,17 @@ fi
 check_staged "$HEAD_SHA"
 if [ "${#STAGED_PATHS[@]}" -eq 0 ]; then
     echo "Patch changes nothing on $HEAD_SHA; nothing to push."
+    exit 0
+fi
+
+# Circuit breaker, once the fix is known to be non-empty: if the failing head
+# is already one of our autofix commits, regeneration is not converging (or
+# something keeps dirtying the docs) - stacking more bot commits would loop.
+# Read from the fetched commit (no API); failing to read it counts as
+# non-convergent.
+if ! HEAD_SUBJECT="$(git_ log -1 --format=%s "$HEAD_SHA")" || [[ "$HEAD_SUBJECT" == "$AUTOFIX_SUBJECT"* ]]; then
+    echo "Head $HEAD_SHA is (or may be) an autofix commit; refusing to stack another."
+    cd / && comment_fallback "the previous auto-regeneration commit left the docs stale - please regenerate manually"
     exit 0
 fi
 

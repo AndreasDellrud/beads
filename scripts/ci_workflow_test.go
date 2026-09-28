@@ -2748,7 +2748,8 @@ func TestAutofixWorkflowsShareConcurrency(t *testing.T) {
 					Group            string `yaml:"group"`
 					CancelInProgress *bool  `yaml:"cancel-in-progress"`
 				} `yaml:"concurrency"`
-				Steps []ciWorkflowStep `yaml:"steps"`
+				TimeoutMinutes int              `yaml:"timeout-minutes"`
+				Steps          []ciWorkflowStep `yaml:"steps"`
 			} `yaml:"jobs"`
 		}
 		if err := root.Decode(&doc); err != nil {
@@ -2763,6 +2764,10 @@ func TestAutofixWorkflowsShareConcurrency(t *testing.T) {
 		}
 		if job.Concurrency.CancelInProgress == nil || *job.Concurrency.CancelInProgress {
 			t.Errorf("%s job concurrency must set cancel-in-progress: false", file)
+		}
+		// A hung run holds the shared, non-cancelling group: bound it.
+		if job.TimeoutMinutes != 10 {
+			t.Errorf("%s autofix job timeout-minutes = %d, want 10", file, job.TimeoutMinutes)
 		}
 		for _, step := range job.Steps {
 			if strings.HasPrefix(step.Uses, "actions/checkout@") && step.With["persist-credentials"] != "false" {
@@ -2809,7 +2814,13 @@ func TestAutofixScriptsShareGuards(t *testing.T) {
 			`(.base.repo.full_name // "") == $base`,
 			"export GIT_LFS_SKIP_SMUDGE=1",
 			"git -c core.hooksPath=/dev/null",
-			"clone --quiet --bare --filter=blob:none",
+			// Only the branches the run needs, never a whole-repo clone.
+			"git_ init --quiet --bare",
+			"fetch --quiet --no-tags --filter=blob:none origin",
+			`"+refs/heads/$HEAD_BRANCH:refs/autofix/head"`,
+			// The circuit breaker reads the fetched commit and fails closed.
+			`if ! HEAD_SUBJECT="$(git_ log -1 --format=%s "$HEAD_SHA")" || [[ "$HEAD_SUBJECT" == "$AUTOFIX_SUBJECT"* ]]; then`,
+			`if length == 1 then .[0]`,
 			`git_ read-tree "$HEAD_SHA"`,
 			"apply --cached",
 			`check_staged "$HEAD_SHA"`,
@@ -2826,6 +2837,12 @@ func TestAutofixScriptsShareGuards(t *testing.T) {
 		}
 		if strings.Index(code, "if head_branch_protected;") > strings.Index(code, "push --quiet") {
 			t.Errorf("%s must check branch protection before pushing", script)
+		}
+		if regexp.MustCompile(`(?m)^\s*[^#\s][^#\n]*(\bclone\b|/commits/)`).MatchString(code) {
+			t.Errorf("%s clones the whole repository or reads commits through the API", script)
+		}
+		if strings.Contains(code, "fetch") && strings.Count(code, " fetch ") != 1 {
+			t.Errorf("%s: want exactly one fetch (head, plus base for attribution)", script)
 		}
 		// Every git command goes through git_ (no hooks), except the
 		// repository-free `git apply --summary/--numstat` of the validator.
