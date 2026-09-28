@@ -323,6 +323,14 @@ func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 		})
 	}
 
+	// pr.yml's job is the one lane with both the image and the pinned dolt
+	// CLI, so it is where the container and local test servers are compared.
+	job := readCIWorkflow(t, "pr.yml").job(t, "test-domain-uow")
+	const fingerprintStep = "Test Dolt server fingerprint (container + local)"
+	assertStepRunsExactly(t, job, fingerprintStep,
+		"go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/")
+	assertStepEnvValue(t, job, fingerprintStep, "BEADS_TEST_REQUIRE_DOLT_CONTAINER", "1")
+
 	gate := readCIWorkflow(t, "pr.yml").job(t, "ci-gate")
 	gateEnv := gate.step(t, "Evaluate CI gate").Env
 	if !contains(gate.Needs, "test-domain-uow") {

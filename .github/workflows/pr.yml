@@ -877,6 +877,15 @@ jobs:
           sha256sum -c SHA256SUMS
           chmod +x bd-linux-gms-pure
 
+      # The only lane with both the image and the pinned dolt CLI: compares
+      # the container and the local test server backend against the one
+      # checked-in fingerprint, so an image bump cannot drift the container
+      # side unnoticed. REQUIRE makes the container half fail, not skip.
+      - name: Test Dolt server fingerprint (container + local)
+        env:
+          BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
+        run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/
+
       - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
