@@ -1424,6 +1424,7 @@ const (
 	bazelJobName        = "bazel-test"
 	setupBazelActionDir = ".github/actions/setup-bazel"
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 	checkoutSHA         = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 	bazelCacheKeyPrefix = "bazel-v1-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}-"
 	bazelCachePath      = "${{ runner.temp }}/bazel-ci-cache"
@@ -1492,11 +1493,12 @@ func TestBazelWorkflowActionsArePinned(t *testing.T) {
 		setupBazelActionDir + "/action.yml": readSetupBazelAction(t).Runs.Steps,
 	}
 	want := map[string]string{
-		"actions/checkout":        checkoutSHA,
-		setupGoActionFamily:       setupGoSHA,
-		cacheRestoreActionFamily:  cacheSHA,
-		cacheSaveActionFamily:     cacheSHA,
-		"actions/upload-artifact": uploadArtifactSHA,
+		"actions/checkout":          checkoutSHA,
+		setupGoActionFamily:         setupGoSHA,
+		cacheRestoreActionFamily:    cacheSHA,
+		cacheSaveActionFamily:       cacheSHA,
+		"actions/upload-artifact":   uploadArtifactSHA,
+		"actions/download-artifact": downloadArtifactSHA,
 	}
 	for file, list := range steps {
 		for _, step := range list {

@@ -43,8 +43,16 @@ on:
         type: boolean
         required: false
         default: true
+      go-test-json-artifact:
+        description: >
+          Artifact (from the calling run) holding go-test.json, PR Core's
+          `go test -json` on this commit; enables the equivalence skip-parity
+          check. nightly.yml sets it.
+        type: string
+        required: false
+        default: ""
 
-# Main runs always finish (they save the runner cache); PR runs supersede.
+# Main runs always finish (they may save the runner cache); PR runs supersede.
 concurrency:
   group: bazel-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -141,16 +149,29 @@ jobs:
           python3 tools/bazel/critpath.py "$RUNNER_TEMP/bazel-profile.json" \
             --tier "$TIER" --log "$RUNNER_TEMP/bazel-test.log" "${budget[@]}"
 
+      # nightly.yml's PR Core `go test -json` on the same commit.
+      - name: Download go test results
+        if: ${{ always() && inputs.go-test-json-artifact != '' && steps.test.outcome != 'skipped' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.go-test-json-artifact }}
+          path: ${{ runner.temp }}/go-test-json
+
       # Fails on any Go test that `go test` runs and Bazel did not (tag filter,
-      # manual, missing target, empty shard) unless it is allowlisted.
+      # manual, missing target, empty shard) unless it is allowlisted. With
+      # go test results (nightly) it also fails on tests that passed under go
+      # test and were skipped under Bazel; a PR run cannot see those.
       - name: Go test equivalence
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         timeout-minutes: 15
         env:
           DETAILS: ${{ inputs.details && '--details' || '' }}
+          GO_TEST_JSON: ${{ inputs.go-test-json-artifact != '' && format('{0}/go-test-json/go-test.json', runner.temp) || '' }}
         run: |
-          # shellcheck disable=SC2086
-          python3 tools/bazel/equivalence.py --bep "$RUNNER_TEMP/bazel-bep.json" $DETAILS
+          args=()
+          if [ -n "$DETAILS" ]; then args+=("$DETAILS"); fi
+          if [ -n "$GO_TEST_JSON" ]; then args+=(--go-test-json "$GO_TEST_JSON"); fi
+          python3 tools/bazel/equivalence.py --bep "$RUNNER_TEMP/bazel-bep.json" "${args[@]}"
 
       # Runs last: it rewrites BUILD files in the checkout. main moves BUILD
       # inputs (imports, go.mod) without touching Bazel, so drift shows up here

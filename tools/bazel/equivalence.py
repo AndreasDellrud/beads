@@ -8,7 +8,7 @@ picked up, or a sharding bug that makes a shard run zero tests all shrink the
 Bazel set silently: every target Bazel did run is still green. This script
 makes that shrinkage a failure.
 
-Two checks:
+Two checks always run, a third when `go test -json` output is supplied:
 
 1. Package set. Every package `go list` reports with test files must have a
    go_test target (`bazel query 'kind("go_test rule", //...)'`).
@@ -16,17 +16,29 @@ Two checks:
    *testing.T)` in the files `go list` selects (the same -race and
    gms_pure_go build context as PR Core, minus the `^TestEmbedded` skip) must
    appear as a <testcase> in the test.xml of a go_test target that this Bazel
-   invocation tested (read from --build_event_json_file). Runtime skips count
-   as run: `go test` skips them the same way. Bazel testcases that `go test`
-   would not run are reported too.
+   invocation tested (read from --build_event_json_file). Bazel testcases
+   that `go test` would not run are reported too. This check only sees names:
+   a test that runs and passes under `go test` but calls t.Skip under Bazel
+   (a missing env var, no git checkout, a file that is not declared as data)
+   still counts as present here.
+3. Skip parity (--go-test-json, nightly). Given the `go test -json` output of
+   the PR Core command on the same commit, every top-level test that passed
+   under `go test` and was skipped under Bazel is a divergence. The Bazel lane
+   alone cannot see this (a skip looks the same whether or not `go test` also
+   skips), so the nightly workflow runs PR Core's `go test -json` and passes
+   it in. Other status differences (pass/fail either way, skipped under go
+   test but run under Bazel) are reported, not failed: a failing test already
+   fails its own lane.
 
 Divergences listed in the allowlist (tools/bazel/equivalence_allowlist.txt)
 are expected; anything else fails. The allowlist format is one entry per line:
 
-    <package dir> <TestName or glob>   # why this is expected
+    <package dir> <TestName or glob>        # why Bazel does not run it
+    <package dir> <TestName or glob> skip   # why Bazel skips a test go test runs
 
-`*` as the test name matches the whole package (including the package-set
-check).
+The first form (kind "run") covers the name checks; `*` as the test name
+matches the whole package (including the package-set check). The `skip` form
+covers only check 3. Every entry needs a justification after `#`.
 
 Requires: go (with the module cache the packages need), bazel for the query
 unless --no-query, and the BEP JSON plus bazel-testlogs of a `--config=ci`
@@ -46,6 +58,8 @@ GO_LIST_ARGS = ["list", "-e", "-race", "-tags", "gms_pure_go", "-json", "./..."]
 SKIP_RE = re.compile(r"^TestEmbedded")
 TEST_FUNC_RE = re.compile(r"^func\s+(Test\w*)\s*\(\s*\w+\s+\*testing\.T\s*\)", re.M)
 STATUS_RANK = {"skipped": 0, "passed": 1, "failed": 2}
+GO_TEST_STATUS = {"pass": "passed", "fail": "failed", "skip": "skipped"}
+ALLOW_KINDS = ("run", "skip")
 DEFAULT_ALLOWLIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "equivalence_allowlist.txt")
 
 
@@ -55,7 +69,8 @@ def is_go_test_name(name):
 
 
 def go_expected(root, go_json_path=None):
-    """Return {pkg_dir: set(test names)} for packages with test files."""
+    """Return ({pkg_dir: set(test names)} for packages with test files,
+    {import path: pkg_dir} for every package)."""
     if go_json_path:
         with open(go_json_path, encoding="utf-8") as f:
             raw = f.read()
@@ -71,13 +86,15 @@ def go_expected(root, go_json_path=None):
         obj, idx = decoder.raw_decode(raw, idx)
         pkgs.append(obj)
 
-    expected = {}
+    expected, dirs = {}, {}
     for p in pkgs:
+        rel = os.path.relpath(p["Dir"], root)
+        rel = "" if rel == "." else rel.replace(os.sep, "/")
+        if p.get("ImportPath"):
+            dirs[p["ImportPath"]] = rel
         files = (p.get("TestGoFiles") or []) + (p.get("XTestGoFiles") or [])
         if not files:
             continue
-        rel = os.path.relpath(p["Dir"], root)
-        rel = "" if rel == "." else rel.replace(os.sep, "/")
         names = set()
         for name in files:
             with open(os.path.join(p["Dir"], name), encoding="utf-8", errors="replace") as f:
@@ -86,7 +103,29 @@ def go_expected(root, go_json_path=None):
                     if is_go_test_name(t) and not SKIP_RE.search(t):
                         names.add(t)
         expected[rel] = names
-    return expected
+    return expected, dirs
+
+
+def go_test_statuses(path, dirs):
+    """Return {pkg_dir: {test: status}} for top-level tests in `go test -json`
+    output. Packages go list does not know are skipped."""
+    out = {}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            test, action = ev.get("Test"), ev.get("Action")
+            if not test or "/" in test or action not in GO_TEST_STATUS:
+                continue
+            pkg = dirs.get(ev.get("Package", ""))
+            if pkg is None:
+                continue
+            out.setdefault(pkg, {})[test] = GO_TEST_STATUS[action]
+    return out
 
 
 def label_pkg(label):
@@ -194,16 +233,19 @@ def load_allowlist(path):
             if not body:
                 continue
             fields = body.split()
-            if len(fields) != 2 or not why.strip():
-                errors.append(f"{path}:{n}: want '<package dir> <test glob>  # justification', got {line.strip()!r}")
+            kind = fields[2] if len(fields) == 3 else "run"
+            if len(fields) not in (2, 3) or kind not in ALLOW_KINDS or not why.strip():
+                errors.append(
+                    f"{path}:{n}: want '<package dir> <test glob> [skip]  # justification', got {line.strip()!r}"
+                )
                 continue
-            entries.append({"pkg": fields[0], "test": fields[1], "why": why.strip(), "line": n, "used": False})
+            entries.append({"pkg": fields[0], "test": fields[1], "kind": kind, "why": why.strip(), "line": n, "used": False})
     return entries, errors
 
 
-def allowed(entries, pkg, test):
+def allowed(entries, pkg, test, kind="run"):
     for e in entries:
-        if fnmatch.fnmatchcase(pkg, e["pkg"]) and fnmatch.fnmatchcase(test, e["test"]):
+        if e["kind"] == kind and fnmatch.fnmatchcase(pkg, e["pkg"]) and fnmatch.fnmatchcase(test, e["test"]):
             e["used"] = True
             return True
     return False
@@ -216,6 +258,10 @@ def main(argv=None):
     ap.add_argument("--testlogs", default=None, help="default: from the BEP, else <root>/bazel-testlogs")
     ap.add_argument("--allowlist", default=DEFAULT_ALLOWLIST)
     ap.add_argument("--go-list-json", default=None, help="precomputed `go list -json` output (tests)")
+    ap.add_argument(
+        "--go-test-json", default=None,
+        help="`go test -json` output of the PR Core command on the same commit; enables the skip-parity check",
+    )
     ap.add_argument("--bazel", default=os.environ.get("BAZEL", "bazel"))
     ap.add_argument("--no-query", action="store_true", help="skip the bazel query package-set check")
     ap.add_argument("--details", action="store_true", help="list every divergence (nightly)")
@@ -225,7 +271,7 @@ def main(argv=None):
     root = os.path.abspath(args.root)
     entries, allow_errors = load_allowlist(args.allowlist)
 
-    expected = go_expected(root, args.go_list_json)
+    expected, dirs = go_expected(root, args.go_list_json)
     tested, configured, bep_testlogs = read_bep(args.bep)
     # Prefer the BEP's own testlogs dir: the bazel-testlogs symlink follows
     # whatever bazel command ran last, possibly in another output base.
@@ -246,16 +292,34 @@ def main(argv=None):
             if SKIP_RE.search(t):
                 continue
             (allowlisted if allowed(entries, pkg, t) else extra).append((pkg, t))
+
+    # Skip parity: passed under go test, skipped under Bazel.
+    skip_div, skip_allowed, parity_notes = [], [], []
+    go_status = go_test_statuses(args.go_test_json, dirs) if args.go_test_json else None
+    if go_status is not None:
+        for pkg, seen in sorted(observed.items()):
+            gs = go_status.get(pkg, {})
+            for t, bs in sorted(seen.items()):
+                g = gs.get(t)
+                if g is None or g == bs:
+                    continue
+                if g == "passed" and bs == "skipped":
+                    (skip_allowed if allowed(entries, pkg, t, "skip") else skip_div).append((pkg, t))
+                else:
+                    parity_notes.append((pkg, f"{t} (go test {g}, bazel {bs})"))
+    allowlisted += skip_allowed
+
     # Dedupe allowlisted pairs (a package-level entry also covers its tests).
     allowlisted = sorted(set(allowlisted))
-    unused = [e for e in entries if not e["used"]]
+    # Skip entries can only be exercised when go test statuses are known.
+    unused = [e for e in entries if not e["used"] and (e["kind"] == "run" or go_status is not None)]
 
     statuses = {"passed": 0, "skipped": 0, "failed": 0}
     for seen in observed.values():
         for s in seen.values():
             statuses[s] += 1
     n_expected = sum(len(v) for v in expected.values())
-    ok = not (no_target or missing or extra or allow_errors)
+    ok = not (no_target or missing or extra or skip_div or allow_errors)
 
     limit = None if args.details else 40
 
@@ -275,18 +339,29 @@ def main(argv=None):
     ]
     if target_pkgs is not None:
         lines.append(f"query:    {len(target_pkgs)} packages with a go_test target")
+    if go_status is None:
+        lines.append("skips:    not compared (no --go-test-json; the nightly run checks skip parity)")
+    else:
+        n_go = sum(len(v) for v in go_status.values())
+        lines.append(
+            f"skips:    compared with {n_go} go test results: {len(skip_div) + len(skip_allowed)} passed under "
+            f"go test but skipped under Bazel ({len(skip_allowed)} allowlisted), {len(parity_notes)} other differences"
+        )
     lines.append(f"allowlisted divergences: {len(allowlisted)}")
     for title, pairs in (
         ("packages with Go tests but no go_test target", no_target),
         ("tests go test runs that Bazel did not", missing),
         ("tests Bazel ran that go test would not", extra),
+        ("tests go test passed that Bazel skipped", skip_div),
     ):
         if pairs:
             lines += listing(title, pairs)
+    if parity_notes:
+        lines += listing("other status differences (reported, not failed)", parity_notes)
     if args.details and allowlisted:
         lines += listing("allowlisted", allowlisted)
     for e in unused:
-        lines.append(f"note: allowlist line {e['line']} ({e['pkg']} {e['test']}) matched nothing; remove it")
+        lines.append(f"note: allowlist line {e['line']} ({e['pkg']} {e['test']} {e['kind']}) matched nothing; remove it")
     for p in problems:
         lines.append(f"note: {p}")
     lines += allow_errors
@@ -300,6 +375,7 @@ def main(argv=None):
             f"**Equivalence**: {'ok' if ok else 'FAIL'}; go test {n_expected} tests in {len(expected)} packages, "
             f"Bazel saw {sum(len(v) for v in observed.values())} "
             f"(missing {len(missing)}, extra {len(extra)}, packages without target {len(no_target)}, "
+            f"skipped only under Bazel {len(skip_div) if go_status is not None else 'not compared'}, "
             f"allowlisted {len(allowlisted)})\n\n"
         )
         with open(summary, "a", encoding="utf-8") as f:
