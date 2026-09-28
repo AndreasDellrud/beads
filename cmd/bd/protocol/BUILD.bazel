@@ -55,15 +55,17 @@ go_test(
 # protocol_test without the race detector, which --config=docker otherwise
 # turns on for every target: pr.yml's "Contract corpus" job runs
 # `go test ./cmd/bd/protocol` without -race (PR Core covers the race build).
-# Matching it is cheap: one more link of protocol_test plus ~100 test-only
-# libraries the non-race //cmd/bd:bd_for_tests does not already build in that
-# configuration. Racing it instead would also be acceptable (a race-only
-# failure is a real bug); then drop this target and point
-# protocol_docker_test back at :protocol_test.
+# Matching it is cheap: tools/bazel/race.bzl lands protocol_test's deps in
+# the configuration the non-race //cmd/bd:bd_for_tests already builds them in,
+# so the extra work is protocol_test's test-only libraries and one link.
+# Racing it instead would also be acceptable (a race-only failure is a real
+# bug); then drop this target and point protocol_docker_test back at
+# :protocol_test.
 #
 # Tags:
-#   manual: only protocol_docker_test's input; keeps `bazel test //...` in
-#     other lanes from compiling protocol_test a second time.
+#   manual: only protocol_docker_test's input, never a build target of its
+#     own. `bazel test //...` in every lane still builds it through
+#     protocol_docker_test (a test tag filter does not stop the build).
 go_test_race_off(
     name = "protocol_race_off",
     tags = ["manual"],

@@ -8,13 +8,25 @@ go_test rule (whose srcs gazelle would not maintain). The go_test keeps its own
 `race = "auto"` and so follows the setting this transition gives it.
 """
 
-def _race_off_impl(_settings, _attr):
-    return {"@rules_go//go/config:race": False}
+_RACE = "@rules_go//go/config:race"
+
+# rules_go's go_transition (go_binary/go_test with race = "off", e.g.
+# //cmd/bd:bd_for_tests) records the setting it overrides in this private
+# flag. Recording it the same way puts the test's deps in the configuration
+# bd_for_tests already builds them in, instead of a second non-race copy of
+# the whole graph.
+_ORIGINAL_RACE = "@rules_go//go/private/rules:original_race"
+
+def _race_off_impl(settings, _attr):
+    out = {_RACE: False, _ORIGINAL_RACE: settings[_ORIGINAL_RACE]}
+    if settings[_RACE] and not settings[_ORIGINAL_RACE]:
+        out[_ORIGINAL_RACE] = json.encode(True)
+    return out
 
 _race_off = transition(
     implementation = _race_off_impl,
-    inputs = [],
-    outputs = ["@rules_go//go/config:race"],
+    inputs = [_RACE, _ORIGINAL_RACE],
+    outputs = [_RACE, _ORIGINAL_RACE],
 )
 
 def _go_test_race_off_impl(ctx):
