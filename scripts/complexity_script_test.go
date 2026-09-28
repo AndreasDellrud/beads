@@ -160,7 +160,7 @@ func runComplexityDiff(t *testing.T, repo, tool string) (string, error) {
 // complexityGitFixture returns a one-commit git repository holding
 // scripts/ci/complexity.sh, for diff mode (which needs COMPLEXITY_BASE_REF to
 // resolve). The fake analyzer ignores the tree, so the fixture needs no Go
-// source; it keeps the test off the real checkout's history, which Bazel's
+// source beyond one placeholder; it keeps the test off the real checkout's history, which Bazel's
 // runfiles tree does not have.
 func complexityGitFixture(t *testing.T) string {
 	t.Helper()
@@ -174,6 +174,14 @@ func complexityGitFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(repo, "scripts", "ci", "complexity.sh"), script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// complexity.sh scans cmd/ etc.; an empty path list trips `set -u` on
+	// bash 3.2 (macOS), so give it one package like the real tree has.
+	if err := os.MkdirAll(filepath.Join(repo, "cmd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "cmd", "cross.go"), []byte("package main\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
