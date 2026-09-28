@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "fixtures",
@@ -7,6 +7,17 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/storage/dolt",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "fixtures_test",
+    srcs = ["fixtures_test.go"],
+    embed = [":fixtures"],
+    deps = [
+        "//internal/storage/dolt",
+        "//internal/testutil",
         "//internal/types",
     ],
 )

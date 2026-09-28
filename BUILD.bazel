@@ -2,7 +2,11 @@ load("@gazelle//:def.bzl", "gazelle")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 # gazelle:prefix github.com/steveyegge/beads
-# gazelle:build_tags gms_pure_go
+# gazelle drops files whose build constraints name a tag it does not know.
+# integration is listed so the `//go:build integration` test files (and
+# //internal/testutil/integration) are in srcs and deps; rules_go filters them
+# out of every build except --config=integration (.bazelrc), which sets the tag.
+# gazelle:build_tags gms_pure_go,integration
 # integrations/ holds no Go; it stays visible to Bazel (not in .bazelignore)
 # only so //test/docsync can declare the markdown its link checks resolve.
 # gazelle:exclude integrations

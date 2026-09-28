@@ -941,3 +941,87 @@ func TestBazelrcDockerLaneNeverCached(t *testing.T) {
 		}
 	}
 }
+
+// --- integration lane ----------------------------------------------------------
+
+// tagSet parses a comma-separated Go build tag list.
+func tagSet(list string) map[string]bool {
+	set := map[string]bool{}
+	for _, tag := range strings.Split(list, ",") {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			set[tag] = true
+		}
+	}
+	return set
+}
+
+func sameTagSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for tag := range a {
+		if !b[tag] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestBazelIntegrationLaneMatchesMainWorkflow keeps --config=integration in
+// step with main.yml's "Main Linux integration" jobs: the same build tags,
+// race, BEADS_TEST_SKIP=dolt, and none of the variants those jobs do not run.
+// It also requires gazelle to see the same tags (root BUILD.bazel
+// `gazelle:build_tags`): gazelle drops a file whose build constraint names a
+// tag it does not know, so without it no BUILD file would list the integration
+// test files and the lane would silently run the plain package tests instead.
+// With it, a file gaining `//go:build integration` lands in its package's srcs
+// through `make bazel-sync`, whose staleness bazel.yml already fails on.
+func TestBazelIntegrationLaneMatchesMainWorkflow(t *testing.T) {
+	root := bazelPolicyRoot(t)
+	mainYML := readPolicyFile(t, root, ".github/workflows/main.yml")
+	jobTags := regexp.MustCompile(`-race -tags=(\S+) -timeout=30m`).FindAllStringSubmatch(mainYML, -1)
+	if len(jobTags) != 2 {
+		t.Fatalf("main.yml: want the two integration jobs' `go test -race -tags=... -timeout=30m`, found %d", len(jobTags))
+	}
+	want := tagSet(jobTags[0][1])
+	if !want["integration"] || !sameTagSet(want, tagSet(jobTags[1][1])) {
+		t.Fatalf("main.yml integration jobs' tags differ or lack integration: %q, %q", jobTags[0][1], jobTags[1][1])
+	}
+	if strings.Count(mainYML, "env BEADS_TEST_SKIP=dolt gotestsum") < 2 {
+		t.Fatal("main.yml integration jobs no longer run with BEADS_TEST_SKIP=dolt; update test:integration")
+	}
+
+	bazelrc := readPolicyFile(t, root, ".bazelrc")
+	lines := map[string]bool{}
+	var laneTags map[string]bool
+	for _, line := range strings.Split(bazelrc, "\n") {
+		line = strings.TrimSpace(line)
+		lines[line] = true
+		if v, ok := strings.CutPrefix(line, "build:integration --@rules_go//go/config:tags="); ok {
+			laneTags = tagSet(v)
+		}
+	}
+	if !sameTagSet(laneTags, want) {
+		t.Errorf(".bazelrc build:integration tags = %v, want main.yml's %v", laneTags, want)
+	}
+	for _, need := range []string{
+		"test:integration --@rules_go//go/config:race",
+		"test:integration --test_env=BEADS_TEST_SKIP=dolt",
+		"test:integration --test_tag_filters=-requires-docker,-dolt-server,-embedded,-manual",
+	} {
+		if !lines[need] {
+			t.Errorf(".bazelrc lacks %q", need)
+		}
+	}
+
+	m := regexp.MustCompile(`(?m)^# gazelle:build_tags (\S+)$`).FindStringSubmatch(readPolicyFile(t, root, "BUILD.bazel"))
+	if m == nil {
+		t.Fatal("BUILD.bazel has no `# gazelle:build_tags` directive")
+	}
+	gazelleTags := tagSet(m[1])
+	for tag := range want {
+		if !gazelleTags[tag] {
+			t.Errorf("BUILD.bazel `gazelle:build_tags %s` lacks %q: gazelle would leave that lane's files out of every BUILD file", m[1], tag)
+		}
+	}
+}
