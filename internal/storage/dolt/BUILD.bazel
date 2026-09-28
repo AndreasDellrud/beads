@@ -116,6 +116,15 @@ go_library(
     ],
 )
 
+# Under --config=integration, TestMultiProcessSchemaInit* and
+# TestMultiStoreConcurrent_Subprocess build this package with a real
+# `go test -c` (integration.SubprocessRunner). That needs the module's source
+# tree and every dependency's module (dolt, go-mysql-server, ...) in a module
+# cache, which no action has offline, so unlike //internal/testutil/integration
+# (whose build fails on purpose) this target gets no BEADS_TEST_GO_BINARY/SDK
+# data. Fine while the lane keeps BEADS_TEST_SKIP=dolt (main.yml's integration
+# jobs), which skips those tests; a dolt-backed integration variant must build
+# the helper binary with Bazel instead.
 go_test(
     name = "dolt_test",
     srcs = [

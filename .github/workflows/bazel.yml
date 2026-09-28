@@ -223,6 +223,10 @@ jobs:
       # manual, missing target, empty shard) unless it is allowlisted. With
       # go test results (nightly) it also fails on tests that passed under go
       # test and were skipped under Bazel; a PR run cannot see those.
+      # It reads test.xml from bazel-testlogs, which --config=integration
+      # shares with --config=ci (same output directory): if a job ever runs
+      # both lanes, run each lane's equivalence right after its own
+      # `bazel test`, before the other lane overwrites the logs.
       - name: Go test equivalence
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         timeout-minutes: 15
