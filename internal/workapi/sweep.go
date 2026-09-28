@@ -47,6 +47,9 @@ func ValidateSweepRequest(in issueops.SweepRequest) error {
 				issueops.ErrValidation, in.IDPattern, err)
 		}
 	}
+	if in.Limit < 0 {
+		return fmt.Errorf("%w: sweep limit %d is negative; use 0 for no limit", issueops.ErrValidation, in.Limit)
+	}
 	if sweepRequiresFilter(in.Tier) && in.ClosedBefore == nil && in.IDPattern == "" {
 		return fmt.Errorf("%w: a %s sweep requires a closed-before cutoff or an id pattern; "+
 			"pass the pattern \"*\" to sweep every closed issue deliberately",
@@ -366,4 +369,24 @@ func PartitionSweepLiveDependents(candidates []*types.Issue, protected map[strin
 		kept = append(kept, issue)
 	}
 	return kept, protectedCount
+}
+
+// LimitSweepCandidates applies issueops.SweepRequest.Limit to the candidates
+// that survived every protection: the oldest-closed first (closed_at
+// ascending, then id, so two runs over one snapshot pick the same rows), at
+// most limit of them. It returns the kept rows and how many were left behind.
+// A non-positive limit keeps everything. The input slice is not reordered.
+func LimitSweepCandidates(candidates []*types.Issue, limit int) (kept []*types.Issue, remaining int) {
+	if limit <= 0 || len(candidates) <= limit {
+		return candidates, 0
+	}
+	ordered := append([]*types.Issue(nil), candidates...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.ClosedAt != nil && b.ClosedAt != nil && !a.ClosedAt.Equal(*b.ClosedAt) {
+			return a.ClosedAt.Before(*b.ClosedAt)
+		}
+		return a.ID < b.ID
+	})
+	return ordered[:limit], len(ordered) - limit
 }

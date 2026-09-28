@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -66,6 +67,10 @@ a closed bead a live convoy tracks). Live means any status that is not done.
 wisps table, including --no-history beads, which the default ephemeral
 selection leaves to ` + "`bd prune`" + `. It reaches durable-tier rows, so it requires
 --older-than or --pattern, like ` + "`bd prune`" + `.
+
+--limit N caps one run at N beads, oldest-closed first, so a large backlog can
+be drained in bounded transactions; --json then reports "remaining" and
+"has_more". Loop while has_more is true.
 
 --older-than takes days (7, 7d), weeks (2w) or a duration with hour precision
 (36h, 168h, 90m).
@@ -135,6 +140,11 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	olderThan, _ := cmd.Flags().GetString("older-than")
 	pattern, _ := cmd.Flags().GetString("pattern")
+	// Only `bd purge` defines --limit; GetInt on an undefined flag is 0, "no cap".
+	limit, _ := cmd.Flags().GetInt("limit")
+	if limit < 0 {
+		return HandleErrorRespectJSON("invalid --limit value %d: must be 0 (no limit) or positive", limit)
+	}
 
 	// The ROLE refuses an unfiltered durable sweep — that guard is
 	// workapi.ValidateSweepRequest, below every front door. This branch is here
@@ -160,6 +170,7 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 		IDPattern:             pattern,
 		ProtectReferenced:     scope.protectReferenced,
 		ProtectLiveDependents: scope.protectLiveDependents,
+		Limit:                 limit,
 		// A --dry-run and an UNCONFIRMED run ask the role the same question —
 		// "what would this do" — so both send DryRun. --force is this
 		// command's confirmation, not a request field.
@@ -195,16 +206,16 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 
 	switch {
 	case result.Swept == 0:
-		return emitSweepEmpty(scope, olderThan, pattern, result)
+		return emitSweepEmpty(scope, olderThan, pattern, limit, result)
 	case dryRun:
-		return emitSweepDryRun(scope, result)
+		return emitSweepDryRun(scope, limit, result)
 	case !force:
 		return emitSweepConfirm(scope, olderThan, pattern, result)
 	}
 
 	commandDidWrite.Store(true)
 	commandMayEmptyJSONLExport.Store(true)
-	return emitSweepResult(scope, result)
+	return emitSweepResult(scope, limit, result)
 }
 
 // warnSweepDefenseSkips reports the candidates the role's own recheck threw
@@ -238,6 +249,23 @@ func addReferenceStats(scope purgeScope, stats map[string]interface{}, result is
 	}
 }
 
+// addLimitStats reports what --limit left for the next run. It is attached
+// only when the caller asked for a limit, so the unlimited shape is unchanged.
+func addLimitStats(stats map[string]interface{}, limit int, result issueops.SweepResult) {
+	if limit <= 0 {
+		return
+	}
+	stats["remaining"] = result.Remaining
+	stats["has_more"] = result.Remaining > 0
+}
+
+// printLimitNote tells a text reader that --limit left rows behind.
+func printLimitNote(result issueops.SweepResult) {
+	if result.Remaining > 0 {
+		fmt.Printf("  Remaining (over --limit): %d — run again to continue\n", result.Remaining)
+	}
+}
+
 // addLiveDependentStats attaches the live-dependent skip count to a --json
 // payload when the protection held anything back, the way pinned_skipped is
 // reported.
@@ -247,13 +275,14 @@ func addLiveDependentStats(stats map[string]interface{}, result issueops.SweepRe
 	}
 }
 
-func emitSweepEmpty(scope purgeScope, olderThan, pattern string, result issueops.SweepResult) error {
+func emitSweepEmpty(scope purgeScope, olderThan, pattern string, limit int, result issueops.SweepResult) error {
 	if jsonOutput {
 		stats := map[string]interface{}{
 			scope.countKey: 0,
 			"message":      fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName),
 		}
 		addLiveDependentStats(stats, result)
+		addLimitStats(stats, limit, result)
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
@@ -277,7 +306,7 @@ func emitSweepEmpty(scope purgeScope, olderThan, pattern string, result issueops
 	return nil
 }
 
-func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
+func emitSweepDryRun(scope purgeScope, limit int, result issueops.SweepResult) error {
 	if jsonOutput {
 		stats := map[string]interface{}{
 			"dry_run":            true,
@@ -290,6 +319,7 @@ func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
 			stats["pinned_skipped"] = result.Skipped.Pinned
 		}
 		addLiveDependentStats(stats, result)
+		addLimitStats(stats, limit, result)
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
@@ -319,6 +349,7 @@ func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
 		}
 		fmt.Printf("  %s %s%s\n", ui.MutedStyle.Render("Referenced IDs (sample):"), strings.Join(idStrs, ", "), suffix)
 	}
+	printLimitNote(result)
 	fmt.Printf("\n(Dry-run mode — no changes made)\n")
 	return nil
 }
@@ -349,7 +380,7 @@ func emitSweepConfirm(scope purgeScope, olderThan, pattern string, result issueo
 		fmt.Sprintf("Use --force to confirm or --dry-run to preview.\n  %s", hint))
 }
 
-func emitSweepResult(scope purgeScope, result issueops.SweepResult) error {
+func emitSweepResult(scope purgeScope, limit int, result issueops.SweepResult) error {
 	if jsonOutput {
 		stats := map[string]interface{}{
 			scope.countKey: result.Swept,
@@ -361,6 +392,7 @@ func emitSweepResult(scope purgeScope, result issueops.SweepResult) error {
 			stats["pinned_skipped"] = result.Skipped.Pinned
 		}
 		addLiveDependentStats(stats, result)
+		addLimitStats(stats, limit, result)
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
@@ -377,6 +409,7 @@ func emitSweepResult(scope purgeScope, result issueops.SweepResult) error {
 	if result.Skipped.Referenced > 0 {
 		fmt.Printf("  %s %d\n", ui.MutedStyle.Render("Referenced (skipped):"), result.Skipped.Referenced)
 	}
+	printLimitNote(result)
 	return nil
 }
 
@@ -401,9 +434,8 @@ func parseOlderThan(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("empty duration")
 	}
 
-	const day = 24 * time.Hour
 	if days, err := strconv.Atoi(s); err == nil {
-		return positiveAge(time.Duration(days) * day)
+		return daysAge(int64(days))
 	}
 
 	unit := s[len(s)-1]
@@ -413,17 +445,37 @@ func parseOlderThan(s string) (time.Duration, error) {
 		if err != nil {
 			return 0, fmt.Errorf("invalid number %q", s[:len(s)-1])
 		}
+		days := int64(num)
 		if unit == 'w' || unit == 'W' {
-			num *= 7
+			if days > maxOlderThanDays/7 || days < -maxOlderThanDays/7 {
+				return 0, errOlderThanRange
+			}
+			days *= 7
 		}
-		return positiveAge(time.Duration(num) * day)
+		return daysAge(days)
 	}
 
 	age, err := time.ParseDuration(strings.ToLower(s))
 	if err != nil {
-		return 0, fmt.Errorf("unknown duration %q (use a number of days, Nd, Nw, or a duration such as 36h or 90m)", s)
+		// time.ParseDuration refuses an out-of-range value ("9999999h") the
+		// same way it refuses a malformed one, so neither can wrap around.
+		return 0, fmt.Errorf("invalid or out-of-range duration %q (use a number of days, Nd, Nw, or a duration such as 36h or 90m)", s)
 	}
 	return positiveAge(age)
+}
+
+// maxOlderThanDays is the largest day count a time.Duration can hold. A larger
+// value used to overflow silently — 213504d wrapped to 25 minutes — which on a
+// destructive command selected nearly everything instead of nothing.
+const maxOlderThanDays = math.MaxInt64 / int64(24*time.Hour)
+
+var errOlderThanRange = fmt.Errorf("duration out of range (at most %d days)", maxOlderThanDays)
+
+func daysAge(days int64) (time.Duration, error) {
+	if days > maxOlderThanDays {
+		return 0, errOlderThanRange
+	}
+	return positiveAge(time.Duration(days) * 24 * time.Hour)
 }
 
 func positiveAge(age time.Duration) (time.Duration, error) {
@@ -437,6 +489,7 @@ func init() {
 	purgeCmd.Flags().BoolP("force", "f", false, "Actually purge (without this, shows preview)")
 	purgeCmd.Flags().Bool("dry-run", false, "Preview what would be purged with stats")
 	purgeCmd.Flags().String("older-than", "", "Only purge beads closed more than N ago (e.g., 7d, 2w, 30, 36h)")
+	purgeCmd.Flags().Int("limit", 0, "Purge at most N beads this run, oldest-closed first (0 = no limit); --json reports remaining/has_more")
 	purgeCmd.Flags().Bool("wisps-plane", false, "Select every closed row in the wisps table, including --no-history beads (requires --older-than or --pattern)")
 	purgeCmd.Flags().String("pattern", "", "Only purge beads matching ID glob pattern (e.g., *-wisp-*)")
 	rootCmd.AddCommand(purgeCmd)

@@ -429,3 +429,43 @@ func TestSweepLiveDependentsCountOnlyProtectingEdgesFromLiveSources(t *testing.T
 		t.Fatalf("PartitionSweepLiveDependents = %d kept %v, count %d; want [linked orphan] and 2", len(kept), kept, count)
 	}
 }
+
+func TestValidateSweepRequestRefusesANegativeLimit(t *testing.T) {
+	err := ValidateSweepRequest(issueops.SweepRequest{Tier: issueops.SweepEphemeral, Limit: -1})
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Fatalf("negative Limit error = %v, want ErrValidation", err)
+	}
+	if err := ValidateSweepRequest(issueops.SweepRequest{Tier: issueops.SweepEphemeral, Limit: 0}); err != nil {
+		t.Fatalf("zero Limit (no cap) error = %v, want nil", err)
+	}
+}
+
+func TestLimitSweepCandidatesTakesTheOldestClosedFirst(t *testing.T) {
+	at := func(day int) *time.Time {
+		ts := time.Date(2026, 1, day, 0, 0, 0, 0, time.UTC)
+		return &ts
+	}
+	candidates := []*types.Issue{
+		{ID: "c", ClosedAt: at(3)},
+		{ID: "b2", ClosedAt: at(1)},
+		{ID: "a", ClosedAt: at(2)},
+		{ID: "b1", ClosedAt: at(1)},
+	}
+
+	kept, remaining := LimitSweepCandidates(candidates, 3)
+	var got []string
+	for _, issue := range kept {
+		got = append(got, issue.ID)
+	}
+	if strings.Join(got, ",") != "b1,b2,a" || remaining != 1 {
+		t.Fatalf("LimitSweepCandidates(3) = %v, remaining %d; want [b1 b2 a] (closed_at, then id) and 1", got, remaining)
+	}
+	if candidates[0].ID != "c" {
+		t.Fatal("LimitSweepCandidates reordered the caller's slice")
+	}
+	for _, limit := range []int{0, 4, 10} {
+		if kept, remaining := LimitSweepCandidates(candidates, limit); len(kept) != 4 || remaining != 0 {
+			t.Errorf("LimitSweepCandidates(%d) kept %d, remaining %d; want all 4 and 0", limit, len(kept), remaining)
+		}
+	}
+}

@@ -72,7 +72,9 @@ func jsonCount(result map[string]any, key string) int {
 //   - a closed wisp a live wisp depends on (parent-child, tracks) is kept and
 //     counted, on the default purge as much as the plane one;
 //   - --older-than has sub-day precision: rows closed seconds ago are swept
-//     by "1s" and kept by "36h" (which used to be floored to 24h).
+//     by "1s" and kept by "36h" (which used to be floored to 24h), and an
+//     out-of-range value is refused rather than wrapped;
+//   - --limit drains a backlog in bounded runs, reporting remaining/has_more.
 func runPurgeRetentionScenario(t *testing.T, r purgeScenarioRunner) {
 	t.Helper()
 
@@ -115,9 +117,23 @@ func runPurgeRetentionScenario(t *testing.T, r purgeScenarioRunner) {
 			r.mode, preview)
 	}
 
-	result := r.purgeJSON(t, "--wisps-plane", "--older-than", "1s", "--force")
-	if jsonCount(result, "purged_count") != 2 || jsonCount(result, "live_dependent_skipped") != 2 {
-		t.Fatalf("%s: purge = %v; want purged_count 2 and live_dependent_skipped 2", r.mode, result)
+	// --limit drains in bounded runs and says whether more remain.
+	first := r.purgeJSON(t, "--wisps-plane", "--older-than", "1s", "--limit", "1", "--force")
+	if jsonCount(first, "purged_count") != 1 || jsonCount(first, "remaining") != 1 || first["has_more"] != true {
+		t.Fatalf("%s: purge --limit 1 = %v; want purged_count 1, remaining 1, has_more true", r.mode, first)
+	}
+	result := r.purgeJSON(t, "--wisps-plane", "--older-than", "1s", "--limit", "1", "--force")
+	if jsonCount(result, "purged_count") != 1 || jsonCount(result, "live_dependent_skipped") != 2 ||
+		jsonCount(result, "remaining") != 0 || result["has_more"] != false {
+		t.Fatalf("%s: second purge --limit 1 = %v; want purged_count 1, live_dependent_skipped 2, remaining 0, has_more false",
+			r.mode, result)
+	}
+	if stdout, stderr, err := r.run(t, "purge", "--limit", "-1", "--force"); err == nil {
+		t.Fatalf("%s: purge --limit -1 succeeded:\n%s%s", r.mode, stdout, stderr)
+	}
+	if stdout, stderr, err := r.run(t, "purge", "--older-than", "213504d", "--force"); err == nil ||
+		!strings.Contains(stdout+stderr, "out of range") {
+		t.Fatalf("%s: purge --older-than 213504d must refuse as out of range: err=%v\n%s%s", r.mode, err, stdout, stderr)
 	}
 	for id, want := range map[string]bool{
 		wisp: false, noHistory: false,

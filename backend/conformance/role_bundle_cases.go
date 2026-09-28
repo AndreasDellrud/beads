@@ -660,6 +660,8 @@ var roleContractCases = []roleContract{
 		RunSweeperWispsPlaneClearsTheWholeWispsTable,
 		RunSweeperWispsPlaneRequiresAFilter,
 		RunSweeperProtectsLiveDependents,
+		RunSweeperProtectsLiveDependentsAcrossPlanes,
+		RunSweeperLimitTakesTheOldestClosedFirst,
 	),
 
 	roleCases("TreeWalker", "TreeWalker()", oncePerRole,

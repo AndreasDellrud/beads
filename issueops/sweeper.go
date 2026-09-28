@@ -145,6 +145,14 @@ type SweepRequest struct {
 	// it costs one read of the edges pointing at the candidates and one of
 	// their sources. `bd purge` always asks for it; `bd prune` does not.
 	ProtectLiveDependents bool
+	// Limit, when positive, caps how many rows ONE sweep deletes, taking the
+	// OLDEST-CLOSED first (closed_at ascending, then id). The rest are left
+	// for the next call and counted in SweepResult.Remaining, so a caller can
+	// drain a large backlog in bounded transactions instead of one that grows
+	// with the backlog and can outlive the caller's deadline. It applies after
+	// every protection, so it caps rows that would actually go. Zero means no
+	// cap; a negative value is ErrValidation.
+	Limit int
 	// DryRun reports what the sweep WOULD do and deletes nothing. The result
 	// is otherwise the same result — the same counts, the same skips, the same
 	// refusals — computed against the same snapshot the real sweep would have
@@ -213,6 +221,10 @@ type SweepResult struct {
 	Events       int
 	// Skipped reports the candidates the sweep held back and why.
 	Skipped SweepSkips
+	// Remaining is how many rows the sweep WOULD also have deleted but left
+	// because of SweepRequest.Limit. Zero when there is no limit or the
+	// backlog fit; a caller loops while it is non-zero.
+	Remaining int
 	// ReferencedIDs is a BOUNDED SAMPLE of the ids Skipped.Referenced counts —
 	// at most SweepReferencedSampleLimit of them, in the order the candidate
 	// query returned them. It is a sample and not the set: a caller that needs
@@ -301,7 +313,8 @@ type Sweeper interface {
 	// THE ORDER THE NARROWING HAPPENS IN IS PART OF THE ANSWER, because the
 	// skip counters are counted along the way: the tier's closed rows, then
 	// IDPattern, then the pinned and closed_at rechecks, then the
-	// live-dependent protection, then the reference protection. A pinned row
+	// live-dependent protection, then the reference protection, then Limit
+	// (oldest-closed first). A pinned row
 	// excluded by the pattern is therefore NOT counted in Skipped.Pinned — it
 	// was never a candidate — and the counters describe the set the request
 	// actually reached.
@@ -311,7 +324,8 @@ type Sweeper interface {
 	//   - an unset or unrecognized Tier;
 	//   - a SweepDurable or SweepWispsPlane request with neither ClosedBefore
 	//     nor IDPattern (see SweepRequest.ClosedBefore for why this lives here);
-	//   - an IDPattern that is not a well-formed glob.
+	//   - an IDPattern that is not a well-formed glob;
+	//   - a negative Limit.
 	//
 	// A REQUEST THAT MATCHES NOTHING IS A ZERO RESULT AND A NIL ERROR, not a
 	// not-found: an empty set of closed rows is the steady state of a swept

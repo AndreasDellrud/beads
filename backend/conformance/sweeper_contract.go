@@ -747,6 +747,97 @@ func RunSweeperProtectsLiveDependents(t *testing.T, ctx context.Context, fixture
 	sweeperAssertWispRows(t, ctx, fixture, 4, openChild, convoy, hooked, relater)
 }
 
+// RunSweeperProtectsLiveDependentsAcrossPlanes pins that the live-dependent
+// protection reads BOTH dependency tables: a closed wisp that a live DURABLE
+// (issues-table) bead depends on through parent-child, tracks or blocks is
+// kept, whatever not-done status the durable source carries.
+func RunSweeperProtectsLiveDependentsAcrossPlanes(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	if fixture.AddDependencies == nil {
+		t.Skip("fixture has no AddDependencies hook; cannot wire the edges this case needs")
+	}
+	durableLive := func(name string, status types.Status) string {
+		issue := sweeperIssue(fixture, "xplane", name, false)
+		issue.Status = status
+		issue.ClosedAt = nil
+		return sweeperSeed(t, ctx, fixture, issue, nil)
+	}
+	closedWisp := func(name string) string {
+		return sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "xplane", name, true), nil)
+	}
+
+	parent := closedWisp("parent")
+	tracked := closedWisp("tracked")
+	blocker := closedWisp("blocker")
+	loose := closedWisp("loose")
+	child := durableLive("child", types.StatusOpen)
+	convoy := durableLive("convoy", types.StatusInProgress)
+	waiter := durableLive("waiter", types.StatusDeferred)
+
+	if err := fixture.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "sweeper-seed",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: child, DependsOnID: parent, Type: publicops.DepParentChild},
+			{IssueID: convoy, DependsOnID: tracked, Type: publicops.DepTracks},
+			{IssueID: waiter, DependsOnID: blocker, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("wiring cross-plane dependencies: %v", err)
+	}
+
+	result := sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:                  publicops.SweepWispsPlane,
+		IDPattern:             sweeperPattern(fixture, "xplane"),
+		ClosedBefore:          &sweeperCutoff,
+		ProtectLiveDependents: true,
+	})
+	if result.Skipped.LiveDependent != 3 || result.Swept != 1 {
+		t.Errorf("Swept = %d, LiveDependent = %d; want 1 (the unlinked wisp) and 3", result.Swept, result.Skipped.LiveDependent)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 3, parent, tracked, blocker)
+	sweeperAssertWispRows(t, ctx, fixture, 0, loose)
+	sweeperAssertIssueRows(t, ctx, fixture, 3, child, convoy, waiter)
+}
+
+// RunSweeperLimitTakesTheOldestClosedFirst pins issueops.SweepRequest.Limit:
+// one call deletes at most Limit rows, oldest closed_at first, and reports the
+// rest as Remaining; the next call picks up where it stopped.
+func RunSweeperLimitTakesTheOldestClosedFirst(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	seed := func(name string, closed time.Time) string {
+		return sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "limit", name, true), func(issue *types.Issue) {
+			issue.ClosedAt = &closed
+		})
+	}
+	newest := seed("newest", sweeperClosedAt)
+	middle := seed("middle", sweeperClosedAt.Add(-24*time.Hour))
+	oldest := seed("oldest", sweeperClosedAt.Add(-48*time.Hour))
+
+	request := publicops.SweepRequest{
+		Tier:      publicops.SweepEphemeral,
+		IDPattern: sweeperPattern(fixture, "limit"),
+		Limit:     2,
+	}
+	first := sweeperSweep(t, ctx, fixture, request)
+	if first.Swept != 2 || first.Remaining != 1 {
+		t.Fatalf("first limited sweep: Swept = %d, Remaining = %d; want 2 and 1", first.Swept, first.Remaining)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 0, oldest, middle)
+	sweeperAssertWispRows(t, ctx, fixture, 1, newest)
+
+	second := sweeperSweep(t, ctx, fixture, request)
+	if second.Swept != 1 || second.Remaining != 0 {
+		t.Fatalf("second limited sweep: Swept = %d, Remaining = %d; want 1 and 0", second.Swept, second.Remaining)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 0, newest)
+
+	if _, err := fixture.Sweeper.Sweep(ctx, publicops.SweepRequest{
+		Tier: publicops.SweepEphemeral, IDPattern: sweeperPattern(fixture, "limit"), Limit: -1,
+	}); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("negative Limit error = %v, want ErrValidation", err)
+	}
+}
+
 // --- fixture helpers -------------------------------------------------------
 
 // sweeperPattern is the glob that scopes one case's ids: a sweep is asked of a

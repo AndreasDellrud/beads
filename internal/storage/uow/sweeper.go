@@ -103,6 +103,8 @@ func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) 
 		result.Skipped.Referenced = count
 	}
 
+	kept, result.Remaining = workapi.LimitSweepCandidates(kept, req.Limit)
+
 	if len(kept) == 0 {
 		return result, nil
 	}

@@ -43,6 +43,16 @@ func TestParseOlderThan(t *testing.T) {
 		{"abc", 0, true},
 		{"7x", 0, true},
 		{"d", 0, true},
+		// Out of range must be refused, never wrapped: 213504d used to
+		// overflow to 25m26s and select almost every closed row.
+		{"213504d", 0, true},
+		{"213504", 0, true},
+		{"30501w", 0, true},
+		{"106752d", 0, true},
+		{"9223372036854775807d", 0, true},
+		{"99999999999h", 0, true},
+		// The largest representable day count still parses.
+		{"106751d", 106751 * day, false},
 	}
 
 	for _, tt := range tests {

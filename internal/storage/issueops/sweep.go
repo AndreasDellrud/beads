@@ -61,6 +61,8 @@ func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (pub
 		result.Skipped.Referenced = count
 	}
 
+	kept, result.Remaining = workapi.LimitSweepCandidates(kept, req.Limit)
+
 	if len(kept) == 0 {
 		return result, nil
 	}

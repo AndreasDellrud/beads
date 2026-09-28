@@ -44,6 +44,12 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("ProtectsLiveDependents", func(t *testing.T) {
 		conformance.RunSweeperProtectsLiveDependents(t, ctx, fixture)
 	})
+	t.Run("ProtectsLiveDependentsAcrossPlanes", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependentsAcrossPlanes(t, ctx, fixture)
+	})
+	t.Run("LimitTakesTheOldestClosedFirst", func(t *testing.T) {
+		conformance.RunSweeperLimitTakesTheOldestClosedFirst(t, ctx, fixture)
+	})
 	t.Run("LeavesNoHistoryBeadsToTheDurableTier", func(t *testing.T) {
 		conformance.RunSweeperLeavesNoHistoryBeadsToTheDurableTier(t, ctx, fixture)
 	})
