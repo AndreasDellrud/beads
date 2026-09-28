@@ -453,7 +453,7 @@ backup configuration. The backup data at the destination is not deleted.`,
 		}
 
 		// Also remove backup_export if it exists (auto-export may have created it at same URL)
-		_ = bs.BackupRemove(ctx, "backup_export")
+		_ = bs.BackupRemove(ctx, versioncontrolops.ExportBackupName)
 
 		// Remove local config
 		if path, err := doltBackupConfigPath(); err == nil {
