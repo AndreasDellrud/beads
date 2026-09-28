@@ -7,8 +7,32 @@
 # Execution mode comes from repo secrets, passed to .github/actions/setup-bazel:
 #   BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT, RBE_TLS_KEY  all set: remote execution
 #     (any REAPI-compatible service); none set (fork PRs): local execution,
-#     slower but the same results. RBE_TLS_CA and RBE_INSTANCE are optional.
+#     slower but the same results. RBE_TLS_CA is optional. RBE_INSTANCE
+#     (optional, warned about when empty) should name an instance used only by
+#     beads, so its action cache is not shared with other repos on the farm.
 # workflow_dispatch with rbe=off simulates a fork run.
+#
+# Accepted risk (same model as gascity's bazel-test.yml): on push, merge_group
+# and same-repo pull_request runs, code from the PR head runs with the RBE
+# client certificate. setup-bazel is itself PR code, the key file is readable
+# by every later step and by locally executed Bazel actions, and a .bazelrc
+# edit can point the BEP or the executor anywhere. Anyone who can push a
+# branch here can therefore use or copy the certificate and write to the
+# farm's cache. Fork PRs never get it: pull_request from a fork receives no
+# secrets, this workflow has no pull_request_target trigger, and forks cannot
+# write the runner cache. In place: secrets are referenced by the setup step
+# alone and never by a workflow- or job-level env (policy-tested), decoded key
+# material is masked in logs, and CI uploads only remotely executed results
+# (--noremote_upload_local_results in the generated rc). Pending (human
+# decisions, plan H1/F2): a beads-only, independently revocable certificate;
+# a beads-only RBE_INSTANCE; farm-side denial of client action-cache writes;
+# whether same-repo PRs keep remote execution. Until then the lane is
+# advisory and nothing downstream consumes artifacts built here.
+#
+# Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
+# 2 GB (Bazel's --repository_cache plus Bazelisk's Bazel download), written
+# only by a push to main that missed it. No --disk_cache: remote runs use the
+# remote cache, and local runs would need about 7 GB more.
 #
 # Workflow-file changes suppress pull_request runs under the org approval
 # policy; validate edits to this file with workflow_dispatch on the branch.
@@ -103,7 +127,7 @@ jobs:
           RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_INSTANCE || '' }}
 
-      # T1: remote + restored runner cache; T2: remote, cold runner; local:
+      # T1: remote + restored repository cache; T2: remote, cold runner; local:
       # no remote execution (reported, never budgeted).
       - name: Measurement tier
         id: tier
@@ -204,12 +228,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # Only main writes the runner cache, under a run-unique key (restore
-      # picks the newest by prefix). It holds --disk_cache, --repository_cache
-      # and Bazelisk's download, never the rc or credentials.
+      # Only a push to main that missed the exact key writes the runner cache.
+      # Its content (--repository_cache and Bazelisk's download, never the rc
+      # or credentials) is fixed by .bazelversion and MODULE.bazel.lock, so one
+      # entry per lock is enough and later pushes do not churn the quota.
       - name: Save Bazel runner cache
-        if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel.outcome == 'success' }}
+        if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel.outcome == 'success' && steps.bazel.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
-          key: bazel-v1-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}-${{ github.run_id }}
+          key: bazel-repo-v2-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}

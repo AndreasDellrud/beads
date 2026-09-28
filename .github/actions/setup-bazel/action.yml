@@ -1,7 +1,7 @@
 name: setup-bazel
 description: >
   Install a sha256-pinned Bazelisk (Bazel itself comes from .bazelversion),
-  restore the runner Bazel caches (--disk_cache and --repository_cache only),
+  restore the runner Bazel cache (--repository_cache and Bazelisk only),
   and write a CI bazelrc outside the workspace. When the caller passes all of
   BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY in the step env, that rc
   enables --config=remote-exec for every bazel command; with none of them the
@@ -14,21 +14,24 @@ outputs:
   cache-restored:
     description: '"true" when a runner Bazel cache was restored (any prefix match)'
     value: ${{ steps.restore.outputs.cache-matched-key != '' }}
+  cache-hit:
+    description: '"true" when the cache for this .bazelversion and MODULE.bazel.lock was restored exactly'
+    value: ${{ steps.restore.outputs.cache-hit }}
 runs:
   using: composite
   steps:
-    # Saved only from push-to-main runs (see the caller's "Save Bazel runner
-    # cache" step) under a run-unique key, so the cache never freezes at its
-    # first save and PRs never churn the quota; PRs restore the newest prefix.
+    # Keyed on what determines its content; saved only by a push to main that
+    # missed the exact key (see the caller's "Save Bazel runner cache" step).
+    # A lock change restores the previous lock's entry, which still holds most
+    # of the downloads.
     - name: Restore Bazel runner cache
       id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/bazel-ci-cache
-        key: bazel-v1-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}-${{ github.run_id }}
+        key: bazel-repo-v2-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
         restore-keys: |
-          bazel-v1-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}-
-          bazel-v1-${{ runner.os }}-
+          bazel-repo-v2-${{ runner.os }}-
 
     - name: Install Bazelisk
       shell: bash

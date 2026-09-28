@@ -2,13 +2,21 @@
 # Write the CI bazelrc for .github/actions/setup-bazel.
 #
 # Always: --repository_cache under BAZEL_CI_CACHE_DIR (the directory the
-# runner cache saves and restores); with remote execution also --disk_cache.
+# runner cache saves and restores). Never --disk_cache: remote runs have the
+# remote cache, and a local run's disk cache (about 7 GB) would not fit next to
+# its output base on a hosted runner.
 #
 # Remote execution only when all three of BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT
 # and RBE_TLS_KEY are set (repo secrets; empty on fork PRs, so those runs stay
 # local). Exactly one or two of them is a misconfiguration and fails. Optional:
-# RBE_TLS_CA (base64 PEM CA bundle), RBE_INSTANCE (instance name). Cert and key
-# are base64-encoded PEM (raw PEM is accepted too).
+# RBE_TLS_CA (base64 PEM CA bundle) and RBE_INSTANCE (instance name; a warning
+# when empty, because the default instance may share its action cache with
+# other repos on the same farm). Cert and key are base64-encoded PEM (raw PEM
+# is accepted too). Every line of the decoded PEM is masked in the job log.
+#
+# CI uploads only remotely executed results (--noremote_upload_local_results):
+# a job's locally executed actions (PR code included) never enter the shared
+# action cache from here. Developer rcs keep Bazel's default.
 #
 # The rc and the key material go to BAZEL_CI_SECRET_DIR, which must be outside
 # the workspace (tests that walk the checkout must never see an endpoint or a
@@ -37,7 +45,7 @@ case "$secret_dir/" in
 	;;
 esac
 chmod 700 "$secret_dir"
-mkdir -p "$cache_dir/disk" "$cache_dir/repo"
+mkdir -p "$cache_dir/repo"
 
 mask() {
 	local v="${1:-}"
@@ -82,6 +90,11 @@ write_pem() {
 		echo "setup-bazel: $(basename "$dest") secret does not decode to PEM" >&2
 		return 1
 	fi
+	# GitHub masks the secret as stored (base64), not what it decodes to.
+	local line
+	while IFS= read -r line; do
+		[[ -z "$line" || "$line" == -----* ]] || mask "$line"
+	done <<<"$body"
 	printf '%s\n' "$body" >"$dest"
 	chmod 600 "$dest"
 }
@@ -95,34 +108,34 @@ remote=false
 if [[ "$set_fields" -eq 3 ]]; then
 	write_pem "$secret_dir/client.crt" "$cert"
 	write_pem "$secret_dir/client.key" "$key"
+	# Outside the rc block below: write_pem's mask commands go to the log.
+	if [[ -n "$ca" ]]; then
+		write_pem "$secret_dir/ca.crt" "$ca"
+	fi
 	{
 		echo "build:remote-exec --remote_executor=$executor"
 		echo "build:remote-exec --tls_client_certificate=$secret_dir/client.crt"
 		echo "build:remote-exec --tls_client_key=$secret_dir/client.key"
 		if [[ -n "$ca" ]]; then
-			write_pem "$secret_dir/ca.crt" "$ca"
 			echo "build:remote-exec --tls_certificate=$secret_dir/ca.crt"
 		fi
 		if [[ -n "$instance" ]]; then
 			echo "build:remote-exec --remote_instance_name=$instance"
 		fi
+		echo "build:remote-exec --noremote_upload_local_results"
 		# Every command in this job (test, run //:gazelle, query) uses the
 		# executor; the committed .bazelrc holds the generic remote-exec tuning.
 		echo "build --config=remote-exec"
-		# With --remote_download_minimal the disk cache stays small, so main
-		# can save it for PRs.
-		echo "build --disk_cache=$cache_dir/disk"
 	} >>"$rc"
+	if [[ -z "$instance" ]]; then
+		echo "::warning title=RBE_INSTANCE not set::remote execution uses the executor's default instance, whose action cache other repos on the farm may share; set RBE_INSTANCE to a beads-only instance"
+	fi
 	remote=true
 	echo "setup-bazel: remote execution enabled"
 elif [[ "$set_fields" -ne 0 ]]; then
 	echo "setup-bazel: remote execution is partially configured; BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY must be set together (or none, for local execution)" >&2
 	exit 1
 else
-	# No --disk_cache locally: a full local build fills about 7 GB of disk
-	# cache on top of an 11 GB output base, a local run never saves the
-	# runner cache (only push-to-main does, and main has the secrets), and a
-	# hosted runner has little more free disk than that.
 	echo "setup-bazel: no remote execution secrets; running locally"
 fi
 
