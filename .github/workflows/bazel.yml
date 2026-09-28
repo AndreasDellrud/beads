@@ -4,12 +4,12 @@
 # CI_GATE_REQUIRED; promotion needs the equivalence record described in
 # tools/bazel/equivalence.py and a human decision.
 #
-# Execution mode comes from repo secrets, passed to .github/actions/setup-bazel:
-#   BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT, RBE_TLS_KEY  all set: remote execution
-#     (any REAPI-compatible service); none set (fork PRs): local execution,
-#     slower but the same results. RBE_TLS_CA is optional. RBE_INSTANCE
-#     (optional, warned about when empty) should name an instance used only by
-#     beads, so its action cache is not shared with other repos on the farm.
+# Execution mode, passed to .github/actions/setup-bazel:
+#   repo variable RBE_WEST_WORKERS=true plus secrets RBE_WEST_EXECUTOR (grpcs://
+#     endpoint), RBE_TLS_CERT, RBE_TLS_KEY (base64; RBE_TLS_CA optional):
+#     remote execution on rbe-west, instance "oss" (shared with gascity).
+#   fork PRs and rbe=off dispatches: local execution, slower but the same
+#     results. Same-repo runs are skipped while RBE_WEST_WORKERS is unset.
 # workflow_dispatch with rbe=off simulates a fork run.
 #
 # Accepted risk (same model as gascity's bazel-test.yml): on push, merge_group
@@ -100,6 +100,12 @@ jobs:
     # executor and build everything locally, so they get the larger
     # GitHub-hosted runner.
     runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # Remote execution goes to rbe-west (instance "oss", the Blacksmith-backed
+    # worker pool shared with gascity), switched on by the repo variable
+    # RBE_WEST_WORKERS. Until it is set, only fork PRs and rbe=off dispatches
+    # run (locally); same-repo runs are skipped rather than failing on an
+    # unreachable executor.
+    if: ${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -125,11 +131,11 @@ jobs:
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ (inputs.rbe || 'on') != 'off' && secrets.BAZEL_REMOTE_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && secrets.RBE_INSTANCE || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && 'oss' || '' }}
 
       # T1: remote + restored repository cache; T2: remote, cold runner; local:
       # no remote execution (reported, never budgeted).
