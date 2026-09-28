@@ -13,7 +13,7 @@ diff --git a/nocgo.go b/nocgo.go
 new file mode 100644
 --- /dev/null
 +++ b/nocgo.go
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,44 @@
 +//go:build !cgo
 +
 +// Added by beads (third_party/patches/gozstd_nocgo.patch). gozstd wraps the
@@ -21,12 +21,17 @@ new file mode 100644
 +// every declared dep even when only cgo-constrained files import it. These
 +// stubs let `bazel build --config=pure` compile dolt's store/nbs (a dep of
 +// beads' cgo-only embedded-Dolt files); `go build` never compiles them because
-+// a CGO_ENABLED=0 bd does not import nbs. Every entry point panics.
++// a CGO_ENABLED=0 bd does not import nbs. The package init panics, so a pure
++// binary that links gozstd (the contamination `go build` rejects with
++// CGO_ENABLED=0) fails at startup; bazel.yml's pure lane runs every pure
++// artifact to catch it. The entry points panic as well.
 +package gozstd
 +
 +const DefaultCompressionLevel = 3
 +
 +const errNoCgo = "gozstd: built without cgo"
++
++func init() { panic(errNoCgo + " (linked into a pure binary)") }
 +
 +type CDict struct{}
 +

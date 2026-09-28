@@ -917,3 +917,22 @@ func TestBazelrcPrcoreMatchesPRCoreParallel(t *testing.T) {
 	}
 	t.Fatalf(".bazelrc lacks %q (pr-core.sh runs go test -parallel %s)", want, m[1])
 }
+
+// Docker-lane results depend on host state no action key sees (daemon, dolt
+// image, network), so they must always execute, like the container jobs'
+// -count=1; and no remote-exec run may upload a locally executed result to
+// the shared cache.
+func TestBazelrcDockerLaneNeverCached(t *testing.T) {
+	lines := map[string]bool{}
+	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
+		lines[strings.TrimSpace(line)] = true
+	}
+	for _, want := range []string{
+		"test:docker --nocache_test_results",
+		"build:remote-exec --noremote_upload_local_results",
+	} {
+		if !lines[want] {
+			t.Errorf(".bazelrc lacks %q", want)
+		}
+	}
+}

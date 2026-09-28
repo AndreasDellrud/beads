@@ -23,7 +23,8 @@
 # write the runner cache. In place: secrets are referenced by the setup step
 # alone and never by a workflow- or job-level env (policy-tested), decoded key
 # material is masked in logs, and CI uploads only remotely executed results
-# (--noremote_upload_local_results in the generated rc), and the certificate
+# (--noremote_upload_local_results in .bazelrc's remote-exec config and in
+# the generated rc), and the certificate
 # is issued to beads CI alone, so it can be revoked without affecting other
 # clients. Maintainers decided (2026-09-28) that same-repo PRs keep remote
 # execution under this model. Still open: a beads-only RBE_INSTANCE and
@@ -176,35 +177,12 @@ jobs:
       # pr.yml's build-artifacts job, built by Bazel: the same artifact name
       # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt), so its
       # consumers (PR Core, domain+uow, the package gates) can switch to it.
-      # None does yet. The binary is //cmd/bd:bd_for_tests, the non-race
-      # gms_pure_go cgo bd that Bazel's own tests exec (//cmd/bd:bd is race
-      # built under --config=ci); test:ci downloads it. Unlike `go build`, it
-      # carries no vcs.* or CGO_ENABLED build settings, so `bd version` shows
-      # no commit and scripts/verify-cgo.sh would pass vacuously; no consumer
-      # of this artifact reads either.
+      # None does yet. The script documents which binary and how it differs
+      # from `go build`'s.
       - name: Package bd (ci-build-artifacts layout)
         id: bd-artifact
         if: ${{ always() && steps.test.outcome != 'skipped' }}
-        run: |
-          set -euo pipefail
-          mapfile -t found < <(find -H bazel-out -path '*/bin/cmd/bd/bd_for_tests/bd' -type f)
-          if [ "${#found[@]}" -ne 1 ]; then
-            echo "::error::want exactly one //cmd/bd:bd_for_tests output, found ${#found[@]}: ${found[*]}"
-            exit 1
-          fi
-          source ./.buildflags
-          mkdir -p "$RUNNER_TEMP/bd-artifacts"
-          cd "$RUNNER_TEMP/bd-artifacts"
-          install -m 755 "$GITHUB_WORKSPACE/${found[0]}" bd-linux-gms-pure
-          ./bd-linux-gms-pure version
-          sha256sum bd-linux-gms-pure > SHA256SUMS
-          {
-            echo "commit=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
-            echo "go_version=$(go version bd-linux-gms-pure | sed 's/^[^:]*: //')"
-            echo "build_tags=${BEADS_BUILD_TAGS}"
-            echo "artifact=bd-linux-gms-pure"
-            echo "builder=bazel //cmd/bd:bd_for_tests"
-          } > build-manifest.txt
+        run: ./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"
 
       - name: Upload build artifacts
         if: ${{ always() && steps.bd-artifact.outcome == 'success' }}
@@ -300,7 +278,8 @@ jobs:
   # exact pass-count guard.
   bazel-pure:
     name: Bazel / pure-Go and js/wasm (advisory)
-    runs-on: ubuntu-latest
+    # Same runner choice as bazel-test (remote execution needs Blacksmith).
+    runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 90
     env:
       PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)'
@@ -375,6 +354,23 @@ jobs:
           //internal/storage/embeddeddolt:embeddeddolt_test
           //internal/tracker:tracker_test
 
+      # `go build` with CGO_ENABLED=0 rejects a pure binary whose imports reach
+      # dolt's cgo-only store/nbs (gozstd). Bazel compiles gozstd's pure stubs
+      # instead, whose init panics (third_party/patches/gozstd_nocgo.patch), so
+      # the check happens here: every pure artifact is started once. bd_test
+      # starts in the next step. -test.run=^$ runs no test (TestMain still
+      # runs; BEADS_TEST_SKIP=dolt keeps tracker's from starting a container).
+      - name: Start every pure-Go artifact (gozstd contamination check)
+        run: |
+          set -euo pipefail
+          bazel run --config=pure //cmd/bd:bd -- version
+          bazel test --config=pure \
+            //internal/storage/embeddeddolt:embeddeddolt_test \
+            //internal/tracker:tracker_test \
+            --test_sharding_strategy=disabled \
+            '--test_arg=-test.run=^$' \
+            --test_env=BEADS_TEST_SKIP=dolt
+
       # One unsharded process, like `go test -run`; the test.xml check keeps a
       # selector that matches nothing from passing.
       - name: Run pure-Go cmd/bd test subset (--config=pure)
@@ -396,7 +392,8 @@ jobs:
   # is named in one variable, so a hermetic dolt-server lane can replace it.
   bazel-docker:
     name: Bazel / docker lane (advisory)
-    runs-on: ubuntu-latest
+    # Same runner choice as bazel-test (remote execution needs Blacksmith).
+    runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 90
     env:
       BAZEL_DOCKER_LANE: docker

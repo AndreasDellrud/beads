@@ -1489,11 +1489,14 @@ func TestBazelWorkflowIsAdvisory(t *testing.T) {
 	if !reflect.DeepEqual(names, bazelJobNames) {
 		t.Errorf("%s jobs = %v, want %v", bazelWorkflowName, names, bazelJobNames)
 	}
-	job := workflow.job(t, bazelJobName)
-	// The farm admits the Blacksmith pool only; forks (no secrets) and rbe=off
+	// Every job uses setup-bazel's remote executor when secrets allow. The
+	// farm admits the Blacksmith pool only; forks (no secrets) and rbe=off
 	// build locally on the GitHub-hosted runner.
-	if want := "${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"; job.RunsOn != want {
-		t.Errorf("%s runs-on = %q, want %q", bazelJobName, job.RunsOn, want)
+	const wantRunsOn = "${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+	for name, job := range workflow.Jobs {
+		if job.RunsOn != wantRunsOn {
+			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantRunsOn)
+		}
 	}
 	for _, name := range []string{"pr.yml", "pr-risk.yml"} {
 		for jobName, j := range readCIWorkflow(t, name).Jobs {
@@ -1676,12 +1679,23 @@ func TestBazelWorkflowPublishesBuildArtifacts(t *testing.T) {
 	if pkg.ID == "" || upload.If != "${{ always() && steps."+pkg.ID+".outcome == 'success' }}" {
 		t.Errorf("upload if = %q; want it gated on the package step's success", upload.If)
 	}
+	// The commands live in a script that sources .buildflags itself, so the
+	// build-tag scan (scripts/check-build-tags.sh) still covers bazel.yml.
+	const script = "scripts/ci/package-bazel-bd.sh"
+	if pkg.Run != "./"+script+` "$RUNNER_TEMP/bd-artifacts"` {
+		t.Errorf("package step = %q, want %s", pkg.Run, script)
+	}
+	if strings.Contains(readPolicyFile(t, bazelPolicyRoot(t), ".github/workflows/"+bazelWorkflowName), ".buildflags") {
+		t.Errorf("%s mentions .buildflags; sourcing it would exempt the whole file from the build-tag scan", bazelWorkflowName)
+	}
+	body := readPolicyFile(t, bazelPolicyRoot(t), script)
 	for _, required := range []string{
+		"set -euo pipefail", "source ./.buildflags",
 		"/bin/cmd/bd/bd_for_tests/bd", "bd-linux-gms-pure", "sha256sum bd-linux-gms-pure > SHA256SUMS",
 		"build-manifest.txt", "commit=", "go_version=", "build_tags=", "artifact=bd-linux-gms-pure",
 	} {
-		if !strings.Contains(pkg.Run, required) {
-			t.Errorf("package step does not contain %q:\n%s", required, pkg.Run)
+		if !strings.Contains(body, required) {
+			t.Errorf("%s does not contain %q", script, required)
 		}
 	}
 	// test:ci must download the binary under --remote_download_minimal.
@@ -1698,9 +1712,6 @@ func TestBazelDockerJobMirrorsContainerJobs(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelDockerJobName)
 	for _, name := range []string{"test-domain-uow", "contract-corpus"} {
 		prJob := pr.job(t, name)
-		if job.RunsOn != prJob.RunsOn {
-			t.Errorf("%s runs on %q, want %s's %q", bazelDockerJobName, job.RunsOn, name, prJob.RunsOn)
-		}
 		if pull := prJob.step(t, "Pull Dolt sql-server image").Run; job.step(t, "Pull Dolt sql-server image").Run != pull {
 			t.Errorf("%s pulls the dolt image differently from %s (%q)", bazelDockerJobName, name, pull)
 		}
@@ -1770,6 +1781,29 @@ func TestBazelPureJobMirrorsPureGoJob(t *testing.T) {
 		}
 		if !strings.Contains(build, target) || !strings.Contains(build, "bazel build --config=pure") {
 			t.Errorf("pure build step does not build %s:\n%s", target, build)
+		}
+	}
+
+	// `go build` rejects a pure binary that imports gozstd at compile time;
+	// Bazel compiles gozstd's stubs, whose init panics, so the lane must start
+	// every pure artifact (bd_test starts in the subset step above).
+	start := job.step(t, "Start every pure-Go artifact (gozstd contamination check)").Run
+	for _, required := range []string{
+		"set -euo pipefail",
+		"bazel run --config=pure //cmd/bd:bd -- version",
+		"bazel test --config=pure",
+		"//internal/storage/embeddeddolt:embeddeddolt_test",
+		"//internal/tracker:tracker_test",
+		"'--test_arg=-test.run=^$'",
+	} {
+		if !strings.Contains(start, required) {
+			t.Errorf("pure artifact start step does not contain %q:\n%s", required, start)
+		}
+	}
+	if os.Getenv("TEST_SRCDIR") == "" {
+		patch := readPolicyFile(t, sourceRepoRoot(t), "third_party/patches/gozstd_nocgo.patch")
+		if !strings.Contains(patch, "+func init() { panic(") {
+			t.Error("gozstd_nocgo.patch stubs no longer panic in init; a contaminated pure binary would start")
 		}
 	}
 

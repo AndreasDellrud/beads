@@ -65,13 +65,19 @@ test:docker --test_env=GO_TEST_WRAP_TESTV=1
 # 4 dolt containers starting at once) and -test.parallel=4.
 test:docker --local_test_jobs=4
 test:docker --test_arg=-test.parallel=4
+# The variants depend on host state no action key sees (the docker daemon,
+# the pulled dolt image, the network), so a cached result proves nothing about
+# this host: always run them, like the jobs' `go test -count=1`.
+test:docker --nocache_test_results
 
 # Pure-Go lane: pr.yml's "Check pure-Go and js/wasm boundaries
 # (CGO_ENABLED=0)" job. CGO is off for every Go target (rules_go drops
 # cgo-constrained files like go build does; third_party/patches/
 # gozstd_nocgo.patch lets dolt's store/nbs, an unused but declared dep,
-# compile). bazel.yml builds bd and the job's pure test binaries and runs its
-# -short cmd/bd subset.
+# compile; its package init panics, so a pure binary that links it fails when
+# run). bazel.yml builds bd and the job's pure test binaries, runs each of
+# them once (the contamination check `go build` does at compile time) and runs
+# its -short cmd/bd subset.
 build:pure --@rules_go//go/config:pure
 test:pure --test_arg=-test.short
 # The job passes no -parallel: GOMAXPROCS on a 4-vCPU runner.
@@ -96,6 +102,10 @@ build:remote-exec --jobs=64
 build:remote-exec --remote_download_minimal
 build:remote-exec --remote_timeout=600
 build:remote-exec --remote_retries=3
+# Upload only remotely executed results. A locally executed action (a
+# no-remote-exec test, a host-dependent docker-lane result) must not seed the
+# shared cache that CI and every other developer read.
+build:remote-exec --noremote_upload_local_results
 
 try-import %workspace%/.bazelrc.local
 try-import %workspace%/user.bazelrc
