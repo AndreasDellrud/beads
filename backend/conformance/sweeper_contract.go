@@ -89,6 +89,11 @@ type SweeperFixture struct {
 	// by hand. A nil Exec means "this backend cannot seed raw rows", and the
 	// case that needs it SKIPS with that reason rather than passing quietly.
 	Exec func(ctx context.Context, statements []SQLStatement) error
+	// AddDependencies wires edges between seeded rows, filled from the
+	// backend's DependencyEditor role so each adapter routes an edge to the
+	// dependency table of its source's plane itself. The live-dependent case
+	// needs it; a nil hook SKIPS that case with the reason.
+	AddDependencies func(ctx context.Context, req publicops.AddDependenciesRequest) error
 }
 
 // sweeperClosedAt is the stamp every seeded candidate carries, and
@@ -345,7 +350,7 @@ func RunSweeperDryRunChangesNothing(t *testing.T, ctx context.Context, fixture S
 		IDPattern: sweeperPattern(fixture, "dry"),
 	}
 
-	preview := sweeperSweep(t, ctx, fixture, sweeperWithDryRun(request, true))
+	preview := sweeperSweep(t, ctx, fixture, sweeperAsDryRun(request))
 	if !preview.DryRun {
 		t.Error("preview.DryRun = false; the result must echo the request it answered")
 	}
@@ -356,7 +361,7 @@ func RunSweeperDryRunChangesNothing(t *testing.T, ctx context.Context, fixture S
 
 	// A second preview: a dry run that had deleted anything reports a smaller
 	// number here.
-	if again := sweeperSweep(t, ctx, fixture, sweeperWithDryRun(request, true)); again.Swept != preview.Swept {
+	if again := sweeperSweep(t, ctx, fixture, sweeperAsDryRun(request)); again.Swept != preview.Swept {
 		t.Fatalf("second preview Swept = %d, first = %d: the first preview changed the store", again.Swept, preview.Swept)
 	}
 
@@ -556,7 +561,7 @@ func RunSweeperRecordsExactlyOneHistoryEntry(t *testing.T, ctx context.Context, 
 	}
 
 	before := sweeperHistory(t, ctx, fixture)
-	sweeperSweep(t, ctx, fixture, sweeperWithDryRun(request, true))
+	sweeperSweep(t, ctx, fixture, sweeperAsDryRun(request))
 	if after := sweeperHistory(t, ctx, fixture); after != before {
 		t.Errorf("history went %d -> %d across a DRY RUN, want no entry at all", before, after)
 	}
@@ -607,6 +612,139 @@ func RunSweeperDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Context, 
 	if !cutoff.Equal(snapshotCutoff) {
 		t.Errorf("the caller's cutoff changed: got %v, want %v", cutoff, snapshotCutoff)
 	}
+}
+
+// RunSweeperWispsPlaneClearsTheWholeWispsTable pins issueops.SweepWispsPlane:
+// the selection is the wisps TABLE, so a closed no-history bead — durable-tier,
+// and left alone by SweepEphemeral (RunSweeperLeavesNoHistoryBeadsToTheDurableTier)
+// — goes with the closed ephemeral wisp, while a closed issues-plane row the
+// same pattern admits stays.
+func RunSweeperWispsPlaneClearsTheWholeWispsTable(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	wisp := sweeperSeedClosedIssue(t, ctx, fixture, "plane", true)
+	durable := sweeperSeedClosedIssue(t, ctx, fixture, "plane", false)
+	noHistory := sweeperIssue(fixture, "plane", "nohist", false)
+	noHistory.NoHistory = true
+	if err := fixture.CreateWisp(ctx, noHistory, "sweeper-seed"); err != nil {
+		t.Fatalf("seeding %s: %v", noHistory.ID, err)
+	}
+	pinned := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "plane", "pinned", true), func(issue *types.Issue) {
+		issue.Pinned = true
+	})
+
+	request := publicops.SweepRequest{
+		Tier:         publicops.SweepWispsPlane,
+		IDPattern:    sweeperPattern(fixture, "plane"),
+		ClosedBefore: &sweeperCutoff,
+	}
+	preview := sweeperSweep(t, ctx, fixture, sweeperAsDryRun(request))
+	if preview.Swept != 2 {
+		t.Fatalf("dry-run Swept = %d, want 2 (the ephemeral wisp and the no-history bead)", preview.Swept)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 3, wisp, noHistory.ID, pinned)
+
+	result := sweeperSweep(t, ctx, fixture, request)
+	if result.Swept != 2 {
+		t.Errorf("Swept = %d, want 2 (the ephemeral wisp and the no-history bead)", result.Swept)
+	}
+	if result.Skipped.Pinned != 1 {
+		t.Errorf("Skipped.Pinned = %d, want 1 — the plane selector does not override pinning", result.Skipped.Pinned)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 0, wisp, noHistory.ID)
+	sweeperAssertWispRows(t, ctx, fixture, 1, pinned)
+	sweeperAssertIssueRows(t, ctx, fixture, 1, durable)
+}
+
+// RunSweeperWispsPlaneRequiresAFilter pins that the wisps-plane tier carries
+// the durable tier's require-a-filter gate: it reaches no-history beads, which
+// are durable-tier. The refusal is asserted with its effect, as the durable
+// case does.
+func RunSweeperWispsPlaneRequiresAFilter(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	id := sweeperSeedClosedIssue(t, ctx, fixture, "planegate", true)
+
+	result, err := fixture.Sweeper.Sweep(ctx, publicops.SweepRequest{Tier: publicops.SweepWispsPlane})
+	if !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("Sweep(wisps-plane, no cutoff, no pattern) error = %v, want ErrValidation", err)
+	}
+	if result.Swept != 0 {
+		t.Errorf("refused sweep reported Swept = %d, want 0", result.Swept)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 1, id)
+}
+
+// RunSweeperProtectsLiveDependents pins issueops.SweepRequest.ProtectLiveDependents:
+// a closed row a LIVE row depends on through parent-child, tracks or blocks is
+// held back and counted, while a closed row reached only by a non-structural
+// edge, or only by a dependent that is itself closed, is swept.
+//
+// The live sources carry three different not-done statuses (open,
+// in_progress, hooked), because "live" is the not-done set and not "open".
+// It runs on the wisps-plane tier with a cutoff — the request an
+// orchestrator's retention sweep sends — after proving on a dry run that the
+// same rows ARE candidates without the protection.
+func RunSweeperProtectsLiveDependents(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	if fixture.AddDependencies == nil {
+		t.Skip("fixture has no AddDependencies hook; cannot wire the edges this case needs")
+	}
+	live := func(name string, status types.Status) string {
+		issue := sweeperIssue(fixture, "live", name, true)
+		issue.Status = status
+		issue.ClosedAt = nil
+		return sweeperSeed(t, ctx, fixture, issue, nil)
+	}
+	closed := func(name string) string {
+		return sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "live", name, true), nil)
+	}
+
+	parent := closed("parent")
+	openChild := live("child-open", types.StatusOpen)
+	tracked := closed("tracked")
+	convoy := live("convoy", types.StatusInProgress)
+	blocker := closed("blocker")
+	hooked := live("hooked", types.StatusHooked)
+	related := closed("related")
+	relater := live("relater", types.StatusOpen)
+	doneParent := closed("done-parent")
+	doneChild := closed("done-child")
+
+	if err := fixture.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "sweeper-seed",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: openChild, DependsOnID: parent, Type: publicops.DepParentChild},
+			{IssueID: convoy, DependsOnID: tracked, Type: publicops.DepTracks},
+			{IssueID: hooked, DependsOnID: blocker, Type: publicops.DepBlocks},
+			{IssueID: relater, DependsOnID: related, Type: publicops.DepRelated},
+			{IssueID: doneChild, DependsOnID: doneParent, Type: publicops.DepParentChild},
+		},
+	}); err != nil {
+		t.Fatalf("wiring dependencies: %v", err)
+	}
+
+	request := publicops.SweepRequest{
+		Tier:         publicops.SweepWispsPlane,
+		IDPattern:    sweeperPattern(fixture, "live"),
+		ClosedBefore: &sweeperCutoff,
+	}
+	unprotected := sweeperSweep(t, ctx, fixture, sweeperAsDryRun(request))
+	if unprotected.Swept != 6 || unprotected.Skipped.LiveDependent != 0 {
+		t.Fatalf("unprotected dry run: Swept = %d, LiveDependent = %d; want 6 and 0 — "+
+			"the protection must be asked for", unprotected.Swept, unprotected.Skipped.LiveDependent)
+	}
+
+	request.ProtectLiveDependents = true
+	result := sweeperSweep(t, ctx, fixture, request)
+	if result.Skipped.LiveDependent != 3 {
+		t.Errorf("Skipped.LiveDependent = %d, want 3 (the parent, the tracked bead and the blocker)",
+			result.Skipped.LiveDependent)
+	}
+	if result.Swept != 3 {
+		t.Errorf("Swept = %d, want 3 (the related-only bead and the closed parent/child pair)", result.Swept)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 3, parent, tracked, blocker)
+	sweeperAssertWispRows(t, ctx, fixture, 0, related, doneParent, doneChild)
+	sweeperAssertWispRows(t, ctx, fixture, 4, openChild, convoy, hooked, relater)
 }
 
 // --- fixture helpers -------------------------------------------------------
@@ -664,8 +802,8 @@ func sweeperSeedOpen(t *testing.T, ctx context.Context, fixture SweeperFixture, 
 	return sweeperSeed(t, ctx, fixture, issue, nil)
 }
 
-func sweeperWithDryRun(request publicops.SweepRequest, dryRun bool) publicops.SweepRequest {
-	request.DryRun = dryRun
+func sweeperAsDryRun(request publicops.SweepRequest) publicops.SweepRequest {
+	request.DryRun = true
 	return request
 }
 
