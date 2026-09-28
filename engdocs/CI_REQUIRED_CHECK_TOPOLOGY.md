@@ -36,8 +36,30 @@ Current PR-related workflow names:
 - `.github/workflows/pr.yml`: `PR`
   Runs on `pull_request` and `merge_group`. Contains the baseline PR jobs,
   Linux build artifact stage, policy/lint compatibility jobs, package gates
-  that consume the Linux artifact, focused storage domain/uow coverage, and
-  the baseline aggregate gate `PR / CI Gate / Required`.
+  that consume the Linux artifact, focused storage domain/uow coverage, the
+  Bazel lane (the `bazel` job calls `bazel.yml`), and the baseline aggregate
+  gate `PR / CI Gate / Required`.
+- `.github/workflows/bazel.yml`: `Bazel`
+  Runs on `push` to `main`, manual dispatch, and `workflow_call` only. PRs and
+  merge groups run it once, through `pr.yml`'s `bazel` job. Its `rbe` job
+  decides the execution mode once (`remote`, `local` for fork and Dependabot
+  PRs, or `skip` while the `RBE_WEST_WORKERS` repo variable is unset) and
+  exports it as the `rbe-mode` / `rbe-enabled` outputs; every lane exports its
+  `job.status` as an output named after the job. `pr.yml`'s gate requires the
+  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED` and
+  `BAZEL_DOLTSERVER`. The legacy jobs these mirror stay required in `pr.yml`
+  and `pr-risk.yml`.
+  `.github/scripts/bazel-gate.sh` reads the exported mode, never the variable
+  or the fork flag: mode `skip` allows every Bazel id to skip, mode `local`
+  allows only the remote-only `BAZEL_EMBEDDED`, and mode `remote` allows none.
+  A lane that should run and fails, is cancelled, or reports no result fails
+  the gate, and so does a missing or invalid mode.
+  `bazel-integration` is advisory: it runs in the PR run (remote mode only)
+  but has no gate id, because its legacy counterparts (`main.yml`'s
+  integration jobs) run only on push to `main`. The gate excuses the call's
+  aggregate failure when that lane failed; the gated lanes are still checked
+  on their own ids. `scripts/ci_workflow_test.go` fails when a new
+  `bazel.yml` job has neither a gate id nor an advisory entry.
 - `.github/workflows/pr-risk.yml`: `PR Risk`
   Runs on `pull_request` and `merge_group`. Contains embedded Dolt risk
   detection, embedded build/test shards, the Nix flake smoke check, and the
@@ -102,6 +124,7 @@ Do not require these existing check names directly:
 - `Upgrade smoke (<version> -> candidate)`
 - `Resolve versions to test`
 - `nix build .#default`
+- `Bazel / test` and the other jobs of `bazel.yml`
 
 Those checks should remain visible for diagnosis, but branch protection should
 point at aggregate gates after the gate jobs are verified.
