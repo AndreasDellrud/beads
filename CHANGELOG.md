@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`bd backup` works on a proxied-server workspace bd runs the Dolt server
+  for** (backport of [#6582](https://github.com/gastownhall/beads/pull/6582),
+  [#6584](https://github.com/gastownhall/beads/pull/6584) and
+  [#6694](https://github.com/gastownhall/beads/pull/6694)). `bd backup init`,
+  `sync`, `remove`, `status` and `restore` are routed over the proxied provider
+  on a managed-local proxied server; before this, a proxied workspace — the
+  default topology since 1.3.0 — had no backup path at all. `bd backup restore`
+  refuses while another bd command is attached to the workspace, otherwise
+  stops the proxy and its Dolt child before replacing the database and leaves
+  the workspace quiescent. On a proxied workspace pointed at a Dolt server bd
+  does not own (external host, socket, or beads-team-server) the family stays
+  refused by design with `proxy.backup.unsupported` and `"reason": "design"`:
+  the backup remote is registered on the server, where it is global to every
+  client. Refusal JSON gains an additive `reason` field.
+
+- **`bd purge` covers an orchestrator's wisp retention sweep** (backport of
+  [#6883](https://github.com/gastownhall/beads/pull/6883)).
+  - `--wisps-plane` selects every closed row in the wisps table, including
+    `--no-history` beads, and requires `--older-than` or `--pattern`.
+  - `--limit N` purges at most N beads per run, oldest-closed first; `--json`
+    then reports `remaining` and `has_more`.
+  - `--older-than` on `bd purge` and `bd prune` accepts hour and finer
+    durations (`36h`, `168h`, `90m`). Day values are unchanged. `Nh` used to be
+    converted to whole days — floored above a day, rounded up to one day below
+    it — and is now taken exactly, so `bd prune --older-than 12h` now deletes
+    rows closed 12–24 hours ago. Values too large to represent are refused
+    instead of wrapping.
+
+### Changed
+
+- **`bd purge` keeps closed beads a live bead depends on** through a
+  `parent-child`, `tracks` or `blocks` edge (any not-done status, including
+  custom ones), reported as `live_dependent_skipped`.
+- **`bd backup restore --json` prints a result object on every topology**
+  (`{"restored": true, "source": "<dir>"}`), and `bd backup init`, `sync`,
+  `remove` and `restore` no longer print a usage block after a failure.
+
 ## [1.3.1] - 2026-09-16
 
 ### Changed
