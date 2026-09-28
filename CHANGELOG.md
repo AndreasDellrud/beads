@@ -225,6 +225,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count the same metadata-scoped set `bd list` returns without fetching every
   row.
 
+- **`PATCH /v0/beads/issues/{id}` accepts `claim: true`**, the wire spelling of
+  `bd update <id> --claim`. It passes through to the same lifecycle role the
+  direct route uses (`issueops.UpdateRequest.Claim`), so the claim and the
+  patch land in one transaction with the direct route's semantics: a
+  same-actor re-claim is idempotent (`changed: false`), a foreign holder is
+  409 `already_claimed` and an unclaimable status 409 `not_claimable` — both
+  naming `claim` and carrying `{id}:claim`'s `assignee` / `issue_status`
+  members — and a refused claim writes none of the patch. With `claim: true`
+  the `patch` may be empty. `claim` beside `expected_assignee`,
+  `expected_status` or `force_assignee_transfer` is a 400. A server that
+  predates the member refuses it as `unknown_parameter` before any database
+  work, so an HTTP client can forward `bd update --claim` instead of refusing
+  it, and can never mistake an older server for one that dropped the claim.
+
 ### Fixed
 
 - **`bd show` counts a wisp's comments instead of reporting `comment_count: 0`**

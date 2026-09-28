@@ -997,6 +997,7 @@ go_test(
         "serve_source_test.go",
         "serve_store_identity_test.go",
         "serve_test.go",
+        "serve_update_claim_proxied_integration_test.go",
         "serve_update_proxied_integration_test.go",
         "set_state_proxied_integration_test.go",
         "setup_embedded_test.go",
