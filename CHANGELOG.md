@@ -9,19 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A server-mode workspace with an empty `.beads/dolt` is no longer refused
-  as legacy**
-  ([#5682](https://github.com/gastownhall/beads/issues/5682),
-  [#6935](https://github.com/gastownhall/beads/pull/6935)). bd creates `.beads/dolt` on use even when the data lives on an
-  external Dolt server, and leaves it empty. When the gitignored
-  `.local_version` witness was missing — after a fresh checkout, or when a
-  provisioner created the empty root before `bd init --server --external` —
-  the legacy-upgrade guard refused every command, `bd init` included, as a
-  "legacy Dolt server workspace", and no bd command could repair it. An empty
-  root holds nothing a legacy release could have left, so the guard now admits
-  it: `bd init` writes the witness, and an existing workspace in that state
-  re-seeds it on the next command. A pre-1.0 witness, or a `.beads/dolt` that
-  holds anything, is still refused.
+- **`bd sql` no longer drops the rows of CTE queries or CALL result sets**
+  ([#6932](https://github.com/gastownhall/beads/pull/6932)). In proxied-server
+  mode, `WITH name(cols) AS (...) SELECT ...` and `WITH RECURSIVE ...` queries
+  were misread as writes and printed `OK, 0 rows affected` with no error; they
+  now return their rows. Statements are now classified with the Dolt SQL
+  parser (shared by the proxied and direct paths): reads return rows, plain
+  writes (including CTE-prefixed `UPDATE`/`DELETE`) commit and report
+  `rows_affected`, and anything that may both write and return rows (`CALL`,
+  `EXPLAIN ANALYZE` of a write, `RETURNING`) or that the parser cannot
+  classify is committed and prints whatever rows it returns, so
+  `CALL DOLT_BRANCH(...)`-style result sets are rendered instead of discarded.
+  Visible changes for scripts: in direct server mode a multi-statement write,
+  or a single write statement the parser cannot classify, now prints `OK` /
+  `{"status":"ok"}` (as proxied mode already did) instead of
+  `OK, N rows affected` / `{"rows_affected":N}`; and `--readonly` now refuses
+  statements it cannot parse (for example `PRAGMA`) instead of treating them
+  as reads.
 
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
@@ -45,6 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row is the one authenticating, so an affected workspace can identify itself.
   A token that was already pushed should still be rotated: deleting the row
   locally does not unpublish it from remotes that already have a copy.
+
+- **A server-mode workspace with an empty `.beads/dolt` is no longer refused
+  as legacy**
+  ([#5682](https://github.com/gastownhall/beads/issues/5682),
+  [#6935](https://github.com/gastownhall/beads/pull/6935)). bd creates `.beads/dolt` on use even when the data lives on an
+  external Dolt server, and leaves it empty. When the gitignored
+  `.local_version` witness was missing — after a fresh checkout, or when a
+  provisioner created the empty root before `bd init --server --external` —
+  the legacy-upgrade guard refused every command, `bd init` included, as a
+  "legacy Dolt server workspace", and no bd command could repair it. An empty
+  root holds nothing a legacy release could have left, so the guard now admits
+  it: `bd init` writes the witness, and an existing workspace in that state
+  re-seeds it on the next command. A pre-1.0 witness, or a `.beads/dolt` that
+  holds anything, is still refused.
 
 - **`bd -C dir prime` now describes the target workspace instead of the launch
   directory** ([#5509](https://github.com/gastownhall/beads/issues/5509)). `-C`
@@ -110,8 +128,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach the database another way still need the `bd doctor` /
   `bd recompute-blocked` repair they needed before: `bd batch` (on both its
   plain and its proxied transaction), `bd cook`, `bd mol squash`,
-  `bd mol burn`, `bd duplicates --merge`, and the wisp writes — closes,
-  updates, deletes and demote-to-wisp.
+  `bd mol burn`, `bd duplicates --merge`, the wisp writes — closes, updates,
+  deletes and demote-to-wisp — and every write served through the
+  proxied-server (uow/domain-db) route, which under `--proxied-server` is the
+  ordinary single verbs as well: `bd close`, `bd update`, `bd delete` and
+  `bd dep remove`.
 
 
 - **`bd list --watch --format` is refused instead of silently dropping the
