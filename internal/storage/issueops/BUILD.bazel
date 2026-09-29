@@ -132,6 +132,7 @@ go_test(
         "create_only_errors_test.go",
         "create_only_guard_test.go",
         "create_test.go",
+        "custom_types_parity_test.go",
         "cycle_report_test.go",
         "cycles_test.go",
         "delete_cascade_tables_test.go",
