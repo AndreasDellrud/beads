@@ -137,6 +137,7 @@ go_test(
         "blocked_consistency_test.go",
         "blocked_full_repair_test.go",
         "blocked_merge_test.go",
+        "blocked_recheck_publication_test.go",
         "blocked_recompute_guard_test.go",
         "blocking_annotator_contract_test.go",
         "bootstrap_test.go",
