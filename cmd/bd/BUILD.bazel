@@ -1331,7 +1331,9 @@ sh_test(
 # functions, assigned by the committed manifest) against this configuration's
 # (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
 # bd_for_tests as the subprocess binary, like the jobs' /tmp/bd-cmd-test and
-# /tmp/bd-proxied. The shared proxied harness gets its dolt sql-server from
+# /tmp/bd-proxied. (main.yml's twin job runs the same shard script against
+# build-artifacts' non-race bd-cmd-test; race here is the stricter one.)
+# The shared proxied harness gets its dolt sql-server from
 # internal/testutil's local backend (the pinned dolt in the test wrapper's
 # runfiles) instead of the jobs' container, and fails instead of skipping
 # when it cannot start one. It repeats bd_test's `env`. shard_count must

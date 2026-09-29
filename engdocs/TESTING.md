@@ -105,7 +105,8 @@ on the `local` backend (the `dolt-server` targets); they need no docker and
 execute remotely with `--config=remote-exec`. `--config=docker` runs the same
 suites on the `container` backend (host docker) as the A/B control.
 PR Risk's heavier server tiers have configs of their own, run by bazel.yml
-only with remote execution: `--config=doltserver-proxied` is the
+only with remote execution, each in a job of its own (`bazel-proxied`,
+`bazel-server-storage`): `--config=doltserver-proxied` is the
 proxied-server cmd/bd tier ("Test (Proxied Dolt Cmd N/15)",
 `//cmd/bd:bd_proxied_test`), and `--config=doltserver-integration` the
 server-Dolt storage tier ("Test (Server Dolt Conformance)", "Test (Server

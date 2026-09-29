@@ -1471,6 +1471,8 @@ const (
 	bazelEmbedJobName   = "bazel-embedded"
 	bazelRBEJobName     = "rbe"
 	bazelIntegJobName   = "bazel-integration"
+	bazelProxiedJobName = "bazel-proxied"
+	bazelServerJobName  = "bazel-server-storage"
 	setupBazelActionDir = ".github/actions/setup-bazel"
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
@@ -1486,11 +1488,11 @@ const (
 
 // bazel.yml's jobs: the rbe job that decides the execution mode, the
 // --config=ci lane, and one job per CI job a Bazel config mirrors.
-var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelPureJobName, bazelJobName, bazelRBEJobName}
+var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelRBEJobName}
 
 // The lanes that only run remotely (skipped unless the rbe job chose remote);
 // every other lane also runs locally.
-var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true, bazelIntegJobName: true}
+var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true, bazelIntegJobName: true, bazelProxiedJobName: true, bazelServerJobName: true}
 
 // The rbe job's decision step reads exactly one secret, and only to test it
 // for emptiness: its env value is a boolean, not the secret.
@@ -2038,8 +2040,8 @@ func bazelRuleBlock(build, name string) string {
 func TestBazelIntegrationJob(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	job := workflow.job(t, bazelIntegJobName)
-	if job.TimeoutMinutes > 60 {
-		t.Errorf("%s timeout-minutes = %d; it runs remotely only, keep it near its steps' 30 + 25", bazelIntegJobName, job.TimeoutMinutes)
+	if job.TimeoutMinutes > 45 {
+		t.Errorf("%s timeout-minutes = %d; it runs remotely only, keep it near the step's 30", bazelIntegJobName, job.TimeoutMinutes)
 	}
 	test := job.step(t, "bazel test //... --config=integration")
 	if test.TimeoutMinutes == 0 || test.TimeoutMinutes >= job.TimeoutMinutes {
@@ -2062,7 +2064,7 @@ func TestBazelIntegrationJob(t *testing.T) {
 		t.Errorf("test-count step: if=%q continue-on-error=%v run=%q; want run %q", count.If, count.ContinueOnError, count.Run, wantCount)
 	}
 	logs := job.step(t, "Upload test logs")
-	if logs.If != "${{ failure() && (steps.test.outcome != 'skipped' || steps.server-storage.outcome != 'skipped') }}" || logs.With["name"] != "bazel-integration-testlogs" {
+	if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != "bazel-integration-testlogs" {
 		t.Errorf("test-log upload: if=%q name=%q", logs.If, logs.With["name"])
 	}
 	for name, j := range workflow.Jobs {
@@ -2091,12 +2093,13 @@ func bazelrcLines(t *testing.T) map[string]bool {
 	return lines
 }
 
-// assertBazelTierStep checks a remote-only tier step of a bazel.yml job: it
-// runs exactly `bazel test //... --config=<config>` with its own BEP, keeps
-// bazel's exit status, runs even when an earlier test step failed, and is
-// followed by check_testcases.py on that BEP.
-func assertBazelTierStep(t *testing.T, job ciWorkflowJob, jobName, config, id, bep, wantIf string) {
+// assertBazelTierStep checks the test step of a remote-only tier job in
+// bazel.yml: it runs exactly `bazel test //... --config=<config>` with a BEP,
+// keeps bazel's exit status, has a timeout below the job's, and is followed
+// by check_testcases.py on that BEP.
+func assertBazelTierStep(t *testing.T, job ciWorkflowJob, jobName, config string) {
 	t.Helper()
+	const id, bep, wantIf = "test", "bazel-bep.json", ""
 	step := job.step(t, "bazel test //... --config="+config)
 	if step.ID != id || step.If != wantIf || step.TimeoutMinutes == 0 || step.TimeoutMinutes >= job.TimeoutMinutes {
 		t.Errorf("%s step --config=%s: id=%q if=%q timeout-minutes=%d; want id %q, if %q, a timeout below the job's %d",
@@ -2123,8 +2126,8 @@ func assertBazelTierStep(t *testing.T, job ciWorkflowJob, jobName, config, id, b
 	}
 }
 
-// The proxied-server tier (pr-risk.yml and main.yml "Test (Proxied Dolt Cmd
-// N/15)") and the server-Dolt storage tier (pr-risk.yml "Test (Server Dolt
+// The proxied-server tier (pr-risk.yml "Test (Proxied Dolt Cmd N/15)"; main.yml's
+// twin runs the same shard script on a non-race binary) and the server-Dolt storage tier (pr-risk.yml "Test (Server Dolt
 // Conformance)", "Test (Server Dolt Full Suite N/16)") as Bazel variants:
 // each manifest-sharded variant runs its jobs' shard script with their shard
 // total, the conformance variant the job's exact flags, with the jobs' race
@@ -2180,6 +2183,16 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		if got := strings.TrimSpace(build.step(t, step).Run); got != want {
 			t.Errorf("pr-risk.yml %q = %q, want %q", step, got, want)
 		}
+	}
+	// main.yml's twin proxied jobs run build-artifacts' bd-cmd-test, which
+	// is not race: bd_proxied_test (race, like PR Risk's) is the stricter of
+	// the two. Pinned so a change there is a decision, not drift.
+	mainYML := readCIWorkflow(t, "main.yml")
+	if run := mainYML.job(t, "build-artifacts").step(t, "Build reusable Linux artifacts").Run; !strings.Contains(run, `go test -tags "$BEADS_BUILD_TAGS" -c -o artifacts/bd-cmd-test ./cmd/bd`+"\n") {
+		t.Errorf("main.yml build-artifacts no longer builds the non-race bd-cmd-test this tier is documented against (.bazelrc, cmd/bd:bd_proxied_test):\n%s", run)
+	}
+	if got := mainYML.job(t, "test-proxied-cmd").step(t, "Test proxied-server cmd shard").Env["BEADS_TEST_CMD_BINARY"]; got != "${{ github.workspace }}/ci-build-artifacts/bd-cmd-test" {
+		t.Errorf("main.yml test-proxied-cmd BEADS_TEST_CMD_BINARY = %q, want build-artifacts' bd-cmd-test", got)
 	}
 	// The server jobs' binary: integration-tagged (the lane's build tags) and
 	// not race (dolt_race_off).
@@ -2287,19 +2300,38 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		}
 	}
 
+	// Each tier is a remote-only job of its own (the job if is pinned by
+	// TestBazelWorkflowIsAdvisory via bazelRemoteOnlyJobs): not a step of
+	// bazel-doltserver (which also runs locally, and whose job a gate may
+	// require) or of bazel-integration (which a caller may switch off,
+	// although the server tier is a PR-time tier).
 	workflow := readCIWorkflow(t, bazelWorkflowName)
-	assertBazelTierStep(t, workflow.job(t, bazelDoltJobName), bazelDoltJobName, "doltserver-proxied", "proxied", "bazel-bep-proxied.json",
-		"${{ !cancelled() && steps.bazel.outcome == 'success' && needs.rbe.outputs.enabled == 'true' }}")
-	assertBazelTierStep(t, workflow.job(t, bazelIntegJobName), bazelIntegJobName, "doltserver-integration", "server-storage", "bazel-bep-server-storage.json",
-		"${{ !cancelled() && steps.bazel.outcome == 'success' }}")
-	if logs := workflow.job(t, bazelDoltJobName).step(t, "Upload test logs"); !strings.Contains(logs.If, "steps.proxied.outcome == 'failure'") {
-		t.Errorf("%s uploads no test logs when the proxied tier fails: if=%q", bazelDoltJobName, logs.If)
+	for _, c := range []struct{ job, config, logs string }{
+		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs"},
+		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs"},
+	} {
+		job := workflow.job(t, c.job)
+		if job.TimeoutMinutes == 0 || job.TimeoutMinutes > 30 {
+			t.Errorf("%s timeout-minutes = %d; it runs remotely only (longest shard ~2-8 min), keep it at most 30", c.job, job.TimeoutMinutes)
+		}
+		assertBazelTierStep(t, job, c.job, c.config)
+		if n := len(job.Steps); n != 5 {
+			t.Errorf("%s has %d steps, want checkout, setup-bazel, the tier, check_testcases.py, log upload", c.job, n)
+		}
+		logs := job.step(t, "Upload test logs")
+		if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != c.logs || !strings.HasPrefix(logs.Uses, "actions/upload-artifact@") {
+			t.Errorf("%s test-log upload: if=%q name=%q uses=%q", c.job, logs.If, logs.With["name"], logs.Uses)
+		}
 	}
 	for name, j := range workflow.Jobs {
 		for _, step := range j.Steps {
-			if (strings.Contains(step.Run, "--config=doltserver-proxied") && name != bazelDoltJobName) ||
-				(strings.Contains(step.Run, "--config=doltserver-integration") && name != bazelIntegJobName) {
-				t.Errorf("%s step %q runs a dolt-server tier outside its job", name, step.Name)
+			proxied := strings.Contains(step.Run, "--config=doltserver-proxied")
+			server := strings.Contains(step.Run, "--config=doltserver-integration")
+			if (proxied && name != bazelProxiedJobName) || (server && name != bazelServerJobName) {
+				t.Errorf("%s step %q runs a dolt-server tier outside its own job", name, step.Name)
+			}
+			if (name == bazelIntegJobName || name == bazelDoltJobName) && (proxied || server || strings.Contains(step.Run, "doltserver-")) {
+				t.Errorf("%s step %q runs the proxied or server storage tier; each has its own job", name, step.Name)
 			}
 		}
 	}
