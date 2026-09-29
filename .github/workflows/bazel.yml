@@ -14,11 +14,11 @@
 # BAZEL_DOLTSERVER); .github/scripts/bazel-gate.sh turns the rbe job's
 # rbe-mode output into the skips it accepts, so a lane skipped by its `if:`
 # below passes and one that should have run and failed, was cancelled or
-# reported nothing fails the gate. bazel-integration stays advisory: its
-# legacy counterparts (main.yml's integration jobs) run only on push to main,
-# so the PR gate does not require it, and its failure alone does not fail the
-# gate (bazel-gate.sh excuses the aggregate for it). Direct runs (push to
-# main, workflow_dispatch, nightly.yml's call) gate nothing.
+# reported nothing fails the gate. bazel-integration is not part of the PR
+# call (pr.yml passes integration: "off"): its legacy counterparts, main.yml's
+# integration jobs, run only on push to main, so it runs on push to main,
+# dispatch and nightly, like them. Direct runs (push to main,
+# workflow_dispatch, nightly.yml's call) gate nothing.
 #
 # Execution mode, decided once by the rbe job (every other job needs it and
 # reads its outputs; none re-derives the condition) and passed to
@@ -111,6 +111,16 @@ on:
         type: string
         required: false
         default: ""
+      # A string, not a boolean: on push and dispatch inputs.integration is
+      # null, and null == false in GitHub's loose comparison, so a boolean
+      # test would silently stop the lane on main.
+      integration:
+        description: >
+          "off" skips bazel-integration (pr.yml: its legacy counterparts do
+          not run on PRs); anything else runs it where remote execution is on.
+        type: string
+        required: false
+        default: "on"
       build-artifact-name:
         description: >
           Name of the uploaded bd artifact (ci-build-artifacts layout). pr.yml
@@ -150,7 +160,7 @@ on:
         description: "bazel-embedded's job.status"
         value: ${{ jobs.bazel-embedded.outputs.result }}
       bazel-integration:
-        description: "bazel-integration's job.status (advisory: not in pr.yml's gate)"
+        description: "bazel-integration's job.status (empty in pr.yml's call, which turns the lane off)"
         value: ${{ jobs.bazel-integration.outputs.result }}
       bazel-doltserver:
         description: "bazel-doltserver's job.status"
@@ -658,10 +668,11 @@ jobs:
     name: integration (advisory)
     # Remote execution only, like bazel-embedded: locally the tagged race
     # build of //... plus 14 jobs' worth of tests on one runner is well over
-    # the timeout, for tests main.yml's integration jobs already run.
+    # the timeout, for tests main.yml's integration jobs already run. Off in
+    # pr.yml's call (integration: "off"), as those jobs are off on PRs.
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    if: ${{ needs.rbe.outputs.enabled == 'true' }}
+    if: ${{ needs.rbe.outputs.enabled == 'true' && inputs.integration != 'off' }}
     timeout-minutes: 40
     outputs:
       result: ${{ steps.result.outputs.result }}
@@ -711,9 +722,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # Last step: the job's result as a workflow_call output. Advisory:
-      # pr.yml's ci-gate does not require it, and reads it only to excuse
-      # the aggregate failure this lane causes (bazel-gate.sh).
+      # Last step: the job's result as a workflow_call output (for
+      # symmetry; pr.yml's call turns this lane off).
       - name: Record job result
         id: result
         if: ${{ always() }}

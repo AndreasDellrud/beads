@@ -1513,9 +1513,10 @@ var bazelWorkflowTriggers = []string{"push", "workflow_call", "workflow_dispatch
 
 // What pr.yml's ci-gate does with each bazel.yml lane (every job but the rbe
 // job, whose rbe-mode output the gate reads): a gated lane has a
-// CI_GATE_REQUIRED id read from its workflow_call output; an advisory lane
-// runs in the PR run but has no id, for the recorded reason. A new job in
-// bazel.yml must be added to one of the two (TestBazelLaneIsGatedAlongsideLegacy).
+// CI_GATE_REQUIRED id read from its workflow_call output; an advisory lane is
+// not part of pr.yml's call at all (the call's inputs turn it off, checked by
+// TestBazelGateSimulation), for the recorded reason. A new job in bazel.yml
+// must be added to one of the two (TestBazelLaneIsGatedAlongsideLegacy).
 var bazelLaneGateIDs = map[string]string{
 	bazelJobName:      "BAZEL_TEST",
 	bazelPureJobName:  "BAZEL_PURE",
@@ -1525,6 +1526,19 @@ var bazelLaneGateIDs = map[string]string{
 
 var bazelAdvisoryLanes = map[string]string{
 	bazelIntegJobName: "its legacy counterparts, main.yml's integration jobs, run only on push to main",
+}
+
+// bazel-integration's if: remote only, and off when the caller passes
+// integration: "off" (pr.yml). A string input: on push and dispatch it is
+// null, and null != 'off', so the lane keeps running on main.
+const bazelIntegIf = "${{ needs.rbe.outputs.enabled == 'true' && inputs.integration != 'off' }}"
+
+// pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
+// override would put every PR in local mode and ungate the embedded tier
+// while the gate stays self-consistent.
+var bazelPRCallWith = map[string]string{
+	"build-artifact-name": "bazel-ci-build-artifacts",
+	"integration":         "off",
 }
 
 // The call's aggregate result (needs.bazel.result, through bazel-gate.sh).
@@ -1619,6 +1633,9 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		if bazelRemoteOnlyJobs[name] {
 			want = wantRemoteOnlyIf
 		}
+		if name == bazelIntegJobName {
+			want = bazelIntegIf
+		}
 		if job.If != want {
 			t.Errorf("%s if = %q, want %q", name, job.If, want)
 		}
@@ -1632,6 +1649,7 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 
 type bazelWorkflowCall struct {
 	Inputs map[string]struct {
+		Type    string `yaml:"type"`
 		Default string `yaml:"default"`
 	} `yaml:"inputs"`
 	Secrets map[string]struct {
@@ -1722,6 +1740,12 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	if !reflect.DeepEqual(bazel.Permissions, map[string]any{"contents": "read"}) {
 		t.Errorf("pr.yml bazel job permissions = %v, want contents: read", bazel.Permissions)
 	}
+	if !reflect.DeepEqual(bazel.With, bazelPRCallWith) {
+		t.Errorf("pr.yml bazel job with = %v, want exactly %v (no rbe or other override)", bazel.With, bazelPRCallWith)
+	}
+	if in := call.Inputs["integration"]; in.Type != "string" || in.Default != "on" {
+		t.Errorf("workflow_call input integration = %+v, want type string, default on (a boolean reads null as false on push)", in)
+	}
 	var declared []string
 	for name := range call.Secrets {
 		declared = append(declared, name)
@@ -1752,6 +1776,13 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 				continue
 			}
 			callers++
+			// A caller forwards the RBE secrets: it must never run in a
+			// fork's privileged context (review D1 v2 N5).
+			for _, trigger := range yamlMapKeys(readYAMLNode(t, filepath.Join(".github", "workflows", entry.Name())), "on") {
+				if trigger == "pull_request_target" || trigger == "workflow_run" {
+					t.Errorf("%s calls %s and has trigger %s; a caller may not run with secrets in a fork PR's context", entry.Name(), bazelWorkflowName, trigger)
+				}
+			}
 			if entry.Name() != "pr.yml" && entry.Name() != "nightly.yml" {
 				t.Errorf("%s job %s calls %s; only pr.yml (PRs) and nightly.yml may", entry.Name(), jobName, bazelWorkflowName)
 			}
@@ -1802,8 +1833,8 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	}
 	for id, value := range evaluate.Env {
 		for lane := range bazelAdvisoryLanes {
-			if contains(required, id) && strings.Contains(value, "outputs."+lane) {
-				t.Errorf("ci-gate requires %s from advisory lane %s (%s)", id, lane, bazelAdvisoryLanes[lane])
+			if strings.Contains(value, "outputs."+lane) {
+				t.Errorf("ci-gate env %s reads advisory lane %s, which is not in the PR call (%s)", id, lane, bazelAdvisoryLanes[lane])
 			}
 		}
 	}
@@ -1811,7 +1842,6 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 		"BAZEL_CALL":        "${{ needs.bazel.result }}",
 		"BAZEL_RBE_MODE":    "${{ needs.bazel.outputs.rbe-mode }}",
 		"BAZEL_RBE_ENABLED": "${{ needs.bazel.outputs.rbe-enabled }}",
-		"BAZEL_INTEGRATION": "${{ needs.bazel.outputs." + bazelIntegJobName + " }}",
 	} {
 		if evaluate.Env[key] != want {
 			t.Errorf("ci-gate env %s = %q, want %q", key, evaluate.Env[key], want)
@@ -1861,14 +1891,78 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	}
 }
 
-// bazelLaneRunModes: the rbe modes in which a lane's `if:` runs it. Only the
-// two forms TestBazelWorkflowJobsAndExecutionMode allows are known.
-func bazelLaneRunModes(t *testing.T, lane, ifExpr string) map[string]bool {
+// A called workflow's workflow-level concurrency group is evaluated in the
+// caller's context, where github.workflow is the caller's name: a group equal
+// to the caller's own deadlocks and GitHub cancels the call (BAZEL cancelled,
+// every PR red). So bazel.yml's group never uses github.workflow and, for
+// every event its callers run on, differs from each caller's group (review
+// D1 v2 N4).
+func TestBazelCallConcurrencyDiffersFromCallers(t *testing.T) {
+	group := func(file string) string {
+		t.Helper()
+		var doc struct {
+			Concurrency struct {
+				Group string `yaml:"group"`
+			} `yaml:"concurrency"`
+		}
+		if err := yaml.Unmarshal([]byte(readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/"+file)), &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Concurrency.Group
+	}
+	bazelGroup := group(bazelWorkflowName)
+	if bazelGroup == "" || strings.Contains(bazelGroup, "github.workflow") {
+		t.Fatalf("%s concurrency group = %q; want a fixed prefix, never github.workflow (the caller's name in a call)", bazelWorkflowName, bazelGroup)
+	}
+	exprRe := regexp.MustCompile(`\$\{\{\s*(.*?)\s*\}\}`)
+	eval := func(g, workflowName, event string) string {
+		t.Helper()
+		ctx := map[string]string{
+			"github.workflow":   workflowName,
+			"github.event_name": event,
+			"github.ref":        "refs/pull/123/merge",
+			"github.event.pull_request.number || github.ref": "123",
+		}
+		if event != "pull_request" {
+			ctx["github.ref"] = "refs/heads/gh-readonly-queue/main/pr-123"
+			ctx["github.event.pull_request.number || github.ref"] = ctx["github.ref"]
+		}
+		return exprRe.ReplaceAllStringFunc(g, func(m string) string {
+			v, ok := ctx[exprRe.FindStringSubmatch(m)[1]]
+			if !ok {
+				t.Fatalf("concurrency group %q: cannot evaluate %s", g, m)
+			}
+			return v
+		})
+	}
+	for _, caller := range []string{"pr.yml", "nightly.yml"} {
+		callerGroup := group(caller)
+		if callerGroup == "" {
+			continue // no workflow-level group, nothing to collide with
+		}
+		name := yamlScalar(readYAMLNode(t, filepath.Join(".github", "workflows", caller)), "name")
+		for _, event := range []string{"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"} {
+			if a, b := eval(bazelGroup, name, event), eval(callerGroup, name, event); a == b {
+				t.Errorf("%s event %s: %s's concurrency group %q equals the caller's; the call would deadlock", caller, event, bazelWorkflowName, a)
+			}
+		}
+	}
+}
+
+// bazelLaneRunModes: the rbe modes in which a lane's `if:` runs it, for a
+// call with these inputs. Only the forms TestBazelWorkflowJobsAndExecutionMode
+// allows are known. GitHub's != on strings is case-insensitive.
+func bazelLaneRunModes(t *testing.T, lane, ifExpr string, with map[string]string) map[string]bool {
 	t.Helper()
 	switch ifExpr {
 	case "${{ needs.rbe.outputs.mode != 'skip' }}":
 		return map[string]bool{"remote": true, "local": true}
 	case "${{ needs.rbe.outputs.enabled == 'true' }}":
+		return map[string]bool{"remote": true}
+	case bazelIntegIf:
+		if strings.EqualFold(with["integration"], "off") {
+			return map[string]bool{}
+		}
 		return map[string]bool{"remote": true}
 	}
 	t.Fatalf("%s if = %q: teach bazelLaneRunModes which modes run it", lane, ifExpr)
@@ -1941,12 +2035,23 @@ func TestBazelGateSimulation(t *testing.T) {
 	requireHostTool(t, "bash")
 	root := sourceRepoRoot(t)
 	workflow := readCIWorkflow(t, bazelWorkflowName)
-	step := readCIWorkflow(t, "pr.yml").job(t, "ci-gate").step(t, "Evaluate CI gate")
+	pr := readCIWorkflow(t, "pr.yml")
+	step := pr.job(t, "ci-gate").step(t, "Evaluate CI gate")
+	callWith := pr.job(t, "bazel").With
 
-	lanes := map[string]map[string]bool{} // lane -> modes it runs in
+	lanes := map[string]map[string]bool{} // lane -> modes it runs in, in pr.yml's call
 	for name, job := range workflow.Jobs {
-		if name != bazelRBEJobName {
-			lanes[name] = bazelLaneRunModes(t, name, job.If)
+		if name == bazelRBEJobName {
+			continue
+		}
+		lanes[name] = bazelLaneRunModes(t, name, job.If, callWith)
+		// Advisory lanes are not in the PR call; gated lanes run at least
+		// when remote.
+		if _, advisory := bazelAdvisoryLanes[name]; advisory && len(lanes[name]) != 0 {
+			t.Errorf("advisory lane %s runs in pr.yml's call in modes %v; turn it off there (%s)", name, lanes[name], bazelAdvisoryLanes[name])
+		}
+		if _, gated := bazelLaneGateIDs[name]; gated && !lanes[name]["remote"] {
+			t.Errorf("gated lane %s does not run in pr.yml's call even in remote mode", name)
 		}
 	}
 	enabledFor := func(mode string) string { return strconv.FormatBool(mode == "remote") }
@@ -2018,26 +2123,10 @@ func TestBazelGateSimulation(t *testing.T) {
 		for lane, modes := range lanes {
 			id, gated := bazelLaneGateIDs[lane]
 			if !gated {
-				// Advisory: its own failure (and the aggregate failure it
-				// causes) passes; it runs only where its if allows.
-				if modes[mode] {
-					// Lost before reporting: nothing attributes the
-					// aggregate failure to it.
-					sc(lane+" reported nothing (advisory)", "failure", with(lane, ""), false, bazelAggregateGateID)
-				}
+				// Advisory: not in the call, so it cannot report, and
+				// nothing about it excuses the aggregate.
 				for _, result := range []string{"failure", "cancelled"} {
-					if modes[mode] {
-						sc(lane+" "+result+" (advisory)", "failure", with(lane, result), true, "")
-						// A cancelled call is never excused.
-						sc(lane+" "+result+", aggregate cancelled", "cancelled", with(lane, result), false, bazelAggregateGateID)
-						// Only a reported failure excuses the aggregate.
-						sc(lane+" not reported, aggregate "+result, result, with(lane, ""), false, bazelAggregateGateID)
-						sc(lane+" success, aggregate "+result, result, with(lane, "success"), false, bazelAggregateGateID)
-					} else {
-						// It cannot run in this mode, so it cannot excuse
-						// the aggregate either.
-						sc(lane+" reports "+result+" outside its modes", "failure", with(lane, result), false, bazelAggregateGateID)
-					}
+					sc(lane+" reports "+result+" though off", "failure", with(lane, result), false, bazelAggregateGateID)
 				}
 				continue
 			}
@@ -2053,14 +2142,6 @@ func TestBazelGateSimulation(t *testing.T) {
 				sc(lane+" cancelled, aggregate "+call, call, with(lane, "cancelled"), false, id)
 			}
 			sc(lane+" cancelled, aggregate cancelled", "cancelled", with(lane, "cancelled"), false, id)
-			// The aggregate excused by the advisory lane never hides a
-			// gated lane's own failure.
-			for adv, advModes := range lanes {
-				if _, advGated := bazelLaneGateIDs[adv]; !advGated && advModes[mode] {
-					sc(lane+" failed alongside advisory "+adv, "failure", with(lane, "failure", adv, "failure"), false, id)
-					sc(lane+" skipped alongside advisory "+adv, "failure", with(lane, "", adv, "failure"), false, id)
-				}
-			}
 		}
 	}
 

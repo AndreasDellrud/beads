@@ -54,12 +54,19 @@ Current PR-related workflow names:
   allows only the remote-only `BAZEL_EMBEDDED`, and mode `remote` allows none.
   A lane that should run and fails, is cancelled, or reports no result fails
   the gate, and so does a missing or invalid mode.
-  `bazel-integration` is advisory: it runs in the PR run (remote mode only)
-  but has no gate id, because its legacy counterparts (`main.yml`'s
-  integration jobs) run only on push to `main`. The gate excuses the call's
-  aggregate failure when that lane failed; the gated lanes are still checked
-  on their own ids. `scripts/ci_workflow_test.go` fails when a new
+  `bazel-integration` is not part of the PR call (`pr.yml` passes
+  `integration: "off"`) and has no gate id: its legacy counterparts
+  (`main.yml`'s integration jobs) run only on push to `main`, and so does it
+  (plus dispatch and nightly). `scripts/ci_workflow_test.go` fails when a new
   `bazel.yml` job has neither a gate id nor an advisory entry.
+  Runbook: if `main`'s Bazel BUILD files drift (every PR's Bazel lanes go
+  red, and autofix only patches packages the PR itself changed), the RBE
+  farm is down, or the beads CI RBE client certificate expires (about
+  2027-09-27; a partial secret set also fails every same-repo run), fix
+  `main` (`make bazel-sync`) or renew the secrets, or unset the
+  `RBE_WEST_WORKERS` repo variable: same-repo runs then take mode `skip`,
+  which the gate accepts (fork PRs still run locally, so drift on `main`
+  still reaches them).
 - `.github/workflows/pr-risk.yml`: `PR Risk`
   Runs on `pull_request` and `merge_group`. Contains embedded Dolt risk
   detection, embedded build/test shards, the Nix flake smoke check, and the
