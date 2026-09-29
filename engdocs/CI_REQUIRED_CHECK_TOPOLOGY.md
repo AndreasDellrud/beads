@@ -1,7 +1,7 @@
 # Required Check Topology
 
-Status: aggregate gate jobs are implemented; branch-protection and ruleset
-adoption remain pending. The aggregate-gate policy below remains maintainer
+Status: aggregate gate jobs are implemented, and the default-branch ruleset
+requires both aggregates (see Current State). The aggregate-gate policy below remains maintainer
 context, but `.github/workflows/*.yml` and their structural tests are
 authoritative for current job membership and display names. Copied workflow
 wiring and rollout steps in this note describe the initial rollout, not the
@@ -92,7 +92,17 @@ Current PR-related workflow names:
 
 As of 2026-05-26, the live `gastownhall/beads` ruleset named
 `Protect main - light (beads and gastown)` enforces deletion and non-fast-forward
-protection on the default branch. It does not currently require status checks.
+protection on the default branch. It does not require status checks.
+
+Since 2026-09-29 a second, beads-only ruleset, `beads main: required CI
+gates`, is active on the default branch. It requires the GitHub Actions
+checks `CI Gate / Required` (`pr.yml`, which includes the Bazel lanes through
+the `bazel` call) and `PR Risk Gate / Required` (`pr-risk.yml`). PR Risk's
+gate job was renamed from `CI Gate / Required` to `PR Risk Gate / Required`
+(#6939), so the two required contexts are distinct; before that both
+workflows reported the same check name. Organization admins and one team
+may bypass it. There is no merge queue, so the checks run on
+`pull_request`.
 
 ## Required Check Contract
 
