@@ -14,54 +14,81 @@ import (
 	"github.com/steveyegge/beads/internal/uimd"
 )
 
-// displayShowIssue displays a single issue (reusable for watch mode).
-// Matches the full bd show output: header, metadata, content, labels, deps, comments.
-func displayShowIssue(ctx context.Context, issueID string) {
-	displayShowIssueReturn(ctx, issueID)
-}
-
 // singleIssueSnapshot builds a comparable string from a single issue's state
 // so we can detect when the issue has changed between poll cycles.
 func singleIssueSnapshot(issue *types.Issue) string {
 	return fmt.Sprintf("%s:%s:%d", issue.ID, issue.Status, issue.UpdatedAt.UnixNano())
 }
 
+// issueWatchSource is what a `bd show --watch` loop reads from. render draws
+// the full view and returns the issue it drew, or nil when there was nothing to
+// draw (it reports why itself); fetch re-reads the issue for the change check
+// and returns nil on any failure, which the loop treats as "no change yet".
+// The direct store and the proxied-server provider each supply one, so both
+// routes share the snapshot and redraw rules below instead of copying them.
+type issueWatchSource struct {
+	render func(ctx context.Context) *types.Issue
+	fetch  func(ctx context.Context) *types.Issue
+}
+
+// showWatchPollInterval is how often a watched issue is re-read.
+const showWatchPollInterval = 2 * time.Second
+
 // watchIssue polls for changes to an issue and auto-refreshes the display (GH#654).
 // Uses polling instead of fsnotify because Dolt stores data in a server-side
 // database, not files — file watchers never fire.
-func watchIssue(ctx context.Context, issueID string) {
-	// Initial display and snapshot
-	issue := displayShowIssueReturn(ctx, issueID)
+func watchIssue(ctx context.Context, issueID string) error {
+	return runIssueWatch(ctx, issueWatchSource{
+		render: func(ctx context.Context) *types.Issue { return displayShowIssueReturn(ctx, issueID) },
+		fetch:  func(ctx context.Context) *types.Issue { return fetchIssue(ctx, issueID) },
+	})
+}
+
+// runIssueWatch drives watchIssueLoop on a real ticker until Ctrl+C or SIGTERM.
+// It fails when the initial render found nothing to watch; the render has
+// already said why, so the failure is silent.
+func runIssueWatch(ctx context.Context, src issueWatchSource) error {
+	// Deferred Stop prevents signal handler leak
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
+	ticker := time.NewTicker(showWatchPollInterval)
+	defer ticker.Stop()
+
+	if !watchIssueLoop(ctx, src, ticker.C, sigChan) {
+		return SilentExit()
+	}
+	return nil
+}
+
+// watchIssueLoop renders the issue once, then on every tick re-reads it and
+// redraws only when singleIssueSnapshot changes. It returns when stop fires,
+// or immediately, reporting false, when the initial render found nothing to
+// watch.
+func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.Time, stop <-chan os.Signal) bool {
+	issue := src.render(ctx)
 	if issue == nil {
-		return
+		return false
 	}
 	lastSnapshot := singleIssueSnapshot(issue)
 
 	fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 
-	// Handle Ctrl+C — deferred Stop prevents signal handler leak
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
-
-	pollInterval := 2 * time.Second
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
 	for {
 		select {
-		case <-sigChan:
+		case <-stop:
 			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
-			return
-		case <-ticker.C:
-			issue := fetchIssue(ctx, issueID)
+			return true
+		case <-tick:
+			issue := src.fetch(ctx)
 			if issue == nil {
 				continue
 			}
 			snap := singleIssueSnapshot(issue)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayShowIssue(ctx, issueID)
+				src.render(ctx)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
 		}
@@ -81,6 +108,7 @@ func fetchIssue(ctx context.Context, issueID string) *types.Issue {
 }
 
 // displayShowIssueReturn displays a single issue and returns it for snapshot use.
+// Matches the full bd show output: header, metadata, content, labels, deps, comments.
 func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 	result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
 	if result != nil {

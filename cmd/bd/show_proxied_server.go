@@ -94,19 +94,47 @@ func proxiedIssueReader() (issueops.Reader, error) {
 func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	in := gatherShowProxiedInput(cmd, args)
 
-	if in.watchMode {
-		// Defense in depth, like create's --repo fallback: the pre-provider
-		// gate refuses `show --watch` first. Typed so all three refusals render
-		// identically if one ever becomes reachable.
-		return HandleProxyCapabilityError(AssertProxyCommandCapability("show", ProxyModeProxied, ProxyCapWatch))
-	}
-
 	uw, err := proxiedOpenReadUOW(ctx)
 	if err != nil {
 		return err
 	}
+
+	if err := resolveShowProxiedIDs(ctx, uw, in); err != nil {
+		uw.Close(ctx)
+		return err
+	}
+
+	// Same precedence as the direct route: --as-of answers a point-in-time
+	// read, which has nothing to watch.
+	if in.watchMode && in.asOfRef == "" {
+		// The watch opens a fresh unit of work per poll; holding this one
+		// would pin a transaction for as long as the user watches.
+		uw.Close(ctx)
+		if len(in.ids) != 1 {
+			return HandleErrorRespectJSON("watch mode requires exactly one issue ID")
+		}
+		return runIssueWatch(ctx, proxiedIssueWatchSource(in))
+	}
 	defer uw.Close(ctx)
 
+	switch {
+	case in.asOfRef != "":
+		runShowProxiedAsOf(ctx, uw, in)
+	case in.thread:
+		return runShowProxiedThread(ctx, uw, in)
+	case in.refs:
+		runShowProxiedRefs(ctx, uw, in)
+	case in.children:
+		runShowProxiedChildren(ctx, uw, in)
+	default:
+		return runShowProxiedDefault(ctx, uw, in)
+	}
+	return nil
+}
+
+// resolveShowProxiedIDs turns --current into an explicit id and rejects an
+// empty id list, the same checks the direct route makes before dispatching.
+func resolveShowProxiedIDs(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) error {
 	if in.currentMode {
 		if len(in.ids) > 0 {
 			return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
@@ -120,19 +148,6 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 
 	if len(in.ids) == 0 {
 		return HandleErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
-	}
-
-	switch {
-	case in.asOfRef != "":
-		runShowProxiedAsOf(ctx, uw, in)
-	case in.thread:
-		return runShowProxiedThread(ctx, uw, in)
-	case in.refs:
-		runShowProxiedRefs(ctx, uw, in)
-	case in.children:
-		runShowProxiedChildren(ctx, uw, in)
-	default:
-		return runShowProxiedDefault(ctx, uw, in)
 	}
 	return nil
 }
