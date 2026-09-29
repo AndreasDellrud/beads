@@ -1212,6 +1212,7 @@ type ciWorkflowJob struct {
 	TimeoutMinutes  int                  `yaml:"timeout-minutes"`
 	Strategy        ciWorkflowStrategy   `yaml:"strategy"`
 	Env             map[string]string    `yaml:"env"`
+	Outputs         map[string]string    `yaml:"outputs"`
 }
 
 type ciWorkflowStrategy struct {
@@ -1468,6 +1469,7 @@ const (
 	bazelPureJobName    = "bazel-pure"
 	bazelDoltJobName    = "bazel-doltserver"
 	bazelEmbedJobName   = "bazel-embedded"
+	bazelRBEJobName     = "rbe"
 	setupBazelActionDir = ".github/actions/setup-bazel"
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
@@ -1481,9 +1483,20 @@ const (
 		"steps.bazel.outcome == 'success' && steps.bazel.outputs.cache-hit != 'true' }}"
 )
 
-// bazel.yml's jobs: the --config=ci lane, and one job per pr.yml job a Bazel
-// config mirrors.
-var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelPureJobName, bazelJobName}
+// bazel.yml's jobs: the rbe job that decides the execution mode, the
+// --config=ci lane, and one job per CI job a Bazel config mirrors.
+var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelPureJobName, bazelJobName, bazelRBEJobName}
+
+// The lanes that only run remotely (skipped unless the rbe job chose remote);
+// every other lane also runs locally.
+var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true}
+
+// The rbe job's decision step reads exactly one secret, and only to test it
+// for emptiness: its env value is a boolean, not the secret.
+const (
+	bazelRBESecretPath  = ".jobs." + bazelRBEJobName + ".steps[0].env.HAS_EXECUTOR"
+	bazelRBESecretValue = "${{ secrets.RBE_WEST_EXECUTOR != '' }}"
+)
 
 // The only triggers bazel.yml may have. pull_request_target (and
 // workflow_run) would run with secrets in the context of fork PRs.
@@ -1531,21 +1544,18 @@ func TestBazelWorkflowIsAdvisory(t *testing.T) {
 	if !reflect.DeepEqual(names, bazelJobNames) {
 		t.Errorf("%s jobs = %v, want %v", bazelWorkflowName, names, bazelJobNames)
 	}
-	// Every job uses setup-bazel's remote executor when secrets allow. The
-	// farm admits the Blacksmith pool only; forks (no secrets) and rbe=off
-	// build locally on the GitHub-hosted runner.
-	const wantRunsOn = "${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
-	// rbe-west (instance "oss") is switched on by the repo variable
-	// RBE_WEST_WORKERS; until then same-repo runs are skipped and only fork
-	// PRs and rbe=off dispatches run, locally.
-	const wantIf = "${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}"
-	// Except bazel-embedded: remote only. Run locally, its 27 race test
-	// processes would take an hour or more of a GitHub-hosted runner per fork
-	// PR, for tests pr-risk.yml's embedded jobs already run there.
-	wantIfs := map[string]string{
-		bazelEmbedJobName: "${{ vars.RBE_WEST_WORKERS == 'true' && (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true }}",
-	}
-	gate := "(inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && "
+	// Every lane needs the rbe job and takes its runner, skip rule and
+	// setup-bazel env from that job's outputs alone. Remote runs use the
+	// Blacksmith pool (the farm admits nothing else); local runs (forks,
+	// rbe=off, secret-less Dependabot runs) the GitHub-hosted runner.
+	const wantRunsOn = "${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+	// Local-capable lanes skip only in mode skip (same-repo, RBE_WEST_WORKERS
+	// unset); remote-only lanes (27 race processes and more, an hour or more
+	// on a GitHub-hosted runner, for tests the Go jobs already run there)
+	// skip unless remote.
+	const wantIf = "${{ needs.rbe.outputs.mode != 'skip' }}"
+	const wantRemoteOnlyIf = "${{ needs.rbe.outputs.enabled == 'true' }}"
+	gate := "needs.rbe.outputs.enabled == 'true' && "
 	wantSetupEnv := map[string]string{
 		"BAZEL_REMOTE_EXECUTOR": "${{ " + gate + "secrets.RBE_WEST_EXECUTOR || '' }}",
 		"RBE_TLS_CERT":          "${{ " + gate + "secrets.RBE_TLS_CERT || '' }}",
@@ -1554,12 +1564,18 @@ func TestBazelWorkflowIsAdvisory(t *testing.T) {
 		"RBE_INSTANCE":          "${{ " + gate + "'oss' || '' }}",
 	}
 	for name, job := range workflow.Jobs {
+		if name == bazelRBEJobName {
+			continue
+		}
+		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) {
+			t.Errorf("%s needs = %v, want [%s]", name, job.Needs, bazelRBEJobName)
+		}
 		if job.RunsOn != wantRunsOn {
 			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantRunsOn)
 		}
-		want, ok := wantIfs[name]
-		if !ok {
-			want = wantIf
+		want := wantIf
+		if bazelRemoteOnlyJobs[name] {
+			want = wantRemoteOnlyIf
 		}
 		if job.If != want {
 			t.Errorf("%s if = %q, want %q", name, job.If, want)
@@ -2387,6 +2403,9 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 
 	setupSteps := map[string]bool{}
 	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		if name == bazelRBEJobName {
+			continue // no setup-bazel; its one secret read is pinned below
+		}
 		n := 0
 		for i, step := range job.Steps {
 			if step.Uses == "./"+setupBazelActionDir {
@@ -2409,6 +2428,9 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 		if key || !secretRef.MatchString(value) {
 			return
 		}
+		if path == bazelRBESecretPath && value == bazelRBESecretValue {
+			return // the rbe job's emptiness test (TestBazelRBEJobDecidesOnce)
+		}
 		prefix := path[:strings.LastIndex(path, ".")+1]
 		if !setupSteps[prefix] {
 			t.Errorf("%s: %s reads secrets (%q); only the setup-bazel step's env may", bazelWorkflowName, path, value)
@@ -2424,6 +2446,150 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 			t.Errorf("setup-bazel: %s reads secrets directly; the caller passes them in the step env", path)
 		}
 	})
+}
+
+// The execution mode (remote, local, skip) is decided once, by the rbe job,
+// so a run cannot mix modes and no lane can drift from the others (review D1
+// F1/F5/F6): Dependabot PRs are same-repo but get no secrets, so a condition
+// on vars and fork alone sent them to the remote-only path with nothing to
+// run it. The job's one step reads nothing but four booleans, runs no
+// repository code, and its outputs are the workflow_call outputs.
+func TestBazelRBEJobDecidesOnce(t *testing.T) {
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	job := workflow.job(t, bazelRBEJobName)
+	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != "ubuntu-latest" || len(job.Env) != 0 {
+		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v; want no needs, if or env, on ubuntu-latest",
+			bazelRBEJobName, job.Needs, job.If, job.RunsOn, job.Env)
+	}
+	wantOutputs := map[string]string{
+		"enabled": "${{ steps.decide.outputs.enabled }}",
+		"mode":    "${{ steps.decide.outputs.mode }}",
+	}
+	if !reflect.DeepEqual(job.Outputs, wantOutputs) {
+		t.Errorf("%s outputs = %v, want %v", bazelRBEJobName, job.Outputs, wantOutputs)
+	}
+	if len(job.Steps) != 1 {
+		t.Fatalf("%s has %d steps, want exactly the decision step", bazelRBEJobName, len(job.Steps))
+	}
+	step := job.Steps[0]
+	wantEnv := map[string]string{
+		"RBE_VAR_ON":    "${{ vars.RBE_WEST_WORKERS == 'true' }}",
+		"RBE_INPUT_OFF": "${{ inputs.rbe == 'off' }}",
+		"FORK":          "${{ github.event.pull_request.head.repo.fork == true }}",
+		"HAS_EXECUTOR":  bazelRBESecretValue,
+	}
+	if step.ID != "decide" || step.Uses != "" || step.Shell != "" || len(step.With) != 0 || !reflect.DeepEqual(step.Env, wantEnv) {
+		t.Errorf("%s step: id %q, uses %q, shell %q, with %v, env %v; want id decide, a run step with env %v",
+			bazelRBEJobName, step.ID, step.Uses, step.Shell, step.With, step.Env, wantEnv)
+	}
+
+	// The workflow_call outputs are the rbe job's, for a caller's gate.
+	var doc struct {
+		On struct {
+			WorkflowCall struct {
+				Outputs map[string]struct {
+					Value string `yaml:"value"`
+				} `yaml:"outputs"`
+			} `yaml:"workflow_call"`
+		} `yaml:"on"`
+	}
+	if err := yaml.Unmarshal([]byte(readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/"+bazelWorkflowName)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	gotCallOutputs := map[string]string{}
+	for k, v := range doc.On.WorkflowCall.Outputs {
+		gotCallOutputs[k] = v.Value
+	}
+	wantCallOutputs := map[string]string{
+		"rbe-enabled": "${{ jobs.rbe.outputs.enabled }}",
+		"rbe-mode":    "${{ jobs.rbe.outputs.mode }}",
+	}
+	if !reflect.DeepEqual(gotCallOutputs, wantCallOutputs) {
+		t.Errorf("workflow_call outputs = %v, want %v", gotCallOutputs, wantCallOutputs)
+	}
+
+	// Nothing outside the decision step re-derives the condition.
+	rederive := regexp.MustCompile(`(?i)vars\.RBE_WEST_WORKERS|inputs\.rbe\b|head\.repo\.fork|github\.actor|dependabot`)
+	walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", bazelWorkflowName)), "", func(path string, key bool, value string) {
+		if key || !rederive.MatchString(value) || strings.HasPrefix(path, ".jobs."+bazelRBEJobName+".steps[0].env.") {
+			return
+		}
+		t.Errorf("%s: %s re-derives the execution mode (%q); read needs.rbe.outputs instead", bazelWorkflowName, path, value)
+	})
+
+	// The decision, for the facts GitHub evaluates the four env expressions
+	// on (its == is case-insensitive; a missing secret reads as '').
+	type facts struct {
+		rbeVar, rbeInput, secret string
+		fork                     bool
+	}
+	cases := []struct {
+		name          string
+		in            facts
+		mode, enabled string
+	}{
+		{"same-repo PR with secrets", facts{"true", "", "grpcs://x", false}, "remote", "true"},
+		{"push to main", facts{"true", "", "grpcs://x", false}, "remote", "true"},
+		{"var in other case", facts{"True", "on", "grpcs://x", false}, "remote", "true"},
+		{"Dependabot PR (no secrets)", facts{"true", "", "", false}, "local", "false"},
+		{"fork PR", facts{"true", "", "", true}, "local", "false"},
+		{"fork PR, var unset", facts{"", "", "", true}, "local", "false"},
+		{"dispatch rbe=off", facts{"true", "off", "grpcs://x", false}, "local", "false"},
+		{"call rbe=OFF", facts{"true", "OFF", "grpcs://x", false}, "local", "false"},
+		{"same-repo, var unset", facts{"", "", "grpcs://x", false}, "skip", "false"},
+		{"Dependabot, var unset", facts{"", "", "", false}, "skip", "false"},
+		{"var false", facts{"false", "on", "grpcs://x", false}, "skip", "false"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := map[string]string{
+				"RBE_VAR_ON":    strconv.FormatBool(strings.EqualFold(c.in.rbeVar, "true")),
+				"RBE_INPUT_OFF": strconv.FormatBool(strings.EqualFold(c.in.rbeInput, "off")),
+				"FORK":          strconv.FormatBool(c.in.fork),
+				"HAS_EXECUTOR":  strconv.FormatBool(c.in.secret != ""),
+			}
+			out, err := runBazelRBEDecision(t, step.Run, env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{"mode": c.mode, "enabled": c.enabled}
+			if !reflect.DeepEqual(out, want) {
+				t.Errorf("outputs = %v, want %v", out, want)
+			}
+		})
+	}
+	// A value that is not a boolean fails the job rather than picking a mode.
+	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "FORK": "", "HAS_EXECUTOR": "true",
+	}); err == nil {
+		t.Errorf("decision with FORK='' succeeded with %v; want failure", out)
+	}
+}
+
+// runBazelRBEDecision runs the rbe job's step script under bash -e (as
+// GitHub's default shell) and returns its $GITHUB_OUTPUT.
+func runBazelRBEDecision(t *testing.T, script string, env map[string]string) (map[string]string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	output := filepath.Join(dir, "output")
+	cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_OUTPUT=" + output, "GITHUB_STEP_SUMMARY=" + filepath.Join(dir, "summary")}
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	if b, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("%v: %s", err, b)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		k, v, _ := strings.Cut(line, "=")
+		out[k] = v
+	}
+	return out, nil
 }
 
 // write-bazelrc.sh: no secrets means a local-only rc (fork PRs), a partial set
