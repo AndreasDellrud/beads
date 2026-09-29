@@ -156,6 +156,21 @@ func (t *doltTransaction) dirtyTableNames() []string {
 }
 
 func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
+	pending, err := s.runDoltTransactionRecording(ctx, commitMsg, fn)
+	if err != nil {
+		return err
+	}
+	// Settled here, after the pinned connection and any borrowed ignored-table
+	// connection have gone back to the pool: the recheck needs one of its own.
+	s.settleBlockedRecheck(ctx, pending)
+	return nil
+}
+
+// runDoltTransactionRecording is runDoltTransaction's transaction. Once it has
+// committed it hands back the dependents the callback's unblocking writes
+// recorded on either of its SQL transactions, for the post-commit
+// blocked-state recheck (gastownhall/beads#6716).
+func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) (issueops.BlockedRecheck, error) {
 	// Pin a single connection for the entire operation: SQL transaction,
 	// config protection, and DOLT_COMMIT must all run on the same Dolt
 	// session. Each pool connection has an independent working set in Dolt
@@ -182,18 +197,18 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
+		return issueops.BlockedRecheck{}, fmt.Errorf("failed to acquire connection: %w", err)
 	}
 	defer conn.Close()
 
 	var currentBranch string
 	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
-		return fmt.Errorf("failed to read active branch: %w", err)
+		return issueops.BlockedRecheck{}, fmt.Errorf("failed to read active branch: %w", err)
 	}
 
 	regularTx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to begin regular tx: %w", err)
+		return issueops.BlockedRecheck{}, fmt.Errorf("failed to begin regular tx: %w", err)
 	}
 
 	// The journal counter and rows must commit in the SAME SQL transaction as
@@ -220,7 +235,7 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 		ignoredCleanup, ignoredTx, err = s.beginIgnoredTxOnBranch(ctx, currentBranch)
 		if err != nil {
 			_ = regularTx.Rollback()
-			return err
+			return issueops.BlockedRecheck{}, err
 		}
 		defer ignoredCleanup()
 	}
@@ -237,6 +252,15 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 	// update IS the creation.
 	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(regularTx, s.versionedHistoryEnabled.Load())
 	defer clearVersionScope()
+	// Unblocking writes record their dependents on whichever transaction they
+	// ran in: the regular one, or the ignored one wisps use when the journal
+	// does not pin both planes together.
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(regularTx)
+	defer clearRecheckScope()
+	if !journalEnabled {
+		clearIgnoredRecheckScope := issueops.ScopeBlockedRecheckTransaction(ignoredTx)
+		defer clearIgnoredRecheckScope()
+	}
 
 	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s, journalPinned: journalEnabled}
 
@@ -255,10 +279,17 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 		if !journalEnabled {
 			_ = ignoredTx.Rollback()
 		}
-		return err
+		return issueops.BlockedRecheck{}, err
 	}
 
-	return s.finishDoltTransaction(ctx, conn, tx, commitMsg)
+	if err := s.finishDoltTransaction(ctx, conn, tx, commitMsg); err != nil {
+		return issueops.BlockedRecheck{}, err
+	}
+	pending := issueops.TakeBlockedRecheck(regularTx)
+	if !journalEnabled {
+		pending = pending.Merge(issueops.TakeBlockedRecheck(ignoredTx))
+	}
+	return pending, nil
 }
 
 // finishDoltTransaction commits the regular SQL transaction, its associated

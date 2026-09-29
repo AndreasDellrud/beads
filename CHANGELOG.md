@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The #6716 fan-in stall is fixed on the proxied-server route and the
+  remaining store routes.** Two blockers of one dependent taken away at the
+  same time (parallel workers closing both, or a close racing a
+  `bd dep remove` or a delete of the other) could leave the dependent
+  `is_blocked=1` and missing from `bd ready` until `bd recompute-blocked`
+  ([#6716](https://github.com/gastownhall/beads/issues/6716)). The post-commit
+  recheck the Dolt store write transactions gained for that issue now also
+  runs on every write the proxied-server (uow/domain-db) route serves, which
+  under `--proxied-server` — the default topology — is `bd close` (single
+  and batch), `bd update --status`, `bd dep remove`, `bd delete`, `bd batch`
+  and `bd serve`; on `RunInTransaction` (`bd batch` direct, `bd cook`,
+  `bd mol squash`/`burn`, and SDK callers that close or update inside a
+  transaction); and on the wisp close, update and delete writers and the
+  legacy dependency removal behind `bd duplicates --merge`. Demote-to-wisp
+  moves a row between planes without taking a blocker away and is unchanged.
+
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
   from the yaml-only key list that holds the other tracker secrets, so
@@ -92,15 +108,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   update to an inactive status, a dependency removal, a delete) and runs
   through a Dolt store write transaction now rechecks the dependents it
   recomputed once that transaction has committed
-  ([#6716](https://github.com/gastownhall/beads/issues/6716)). Writes that
-  reach the database another way still need the `bd doctor` /
-  `bd recompute-blocked` repair they needed before: `bd batch` (on both its
-  plain and its proxied transaction), `bd cook`, `bd mol squash`,
-  `bd mol burn`, `bd duplicates --merge`, the wisp writes — closes, updates,
-  deletes and demote-to-wisp — and every write served through the
-  proxied-server (uow/domain-db) route, which under `--proxied-server` is the
-  ordinary single verbs as well: `bd close`, `bd update`, `bd delete` and
-  `bd dep remove`.
+  ([#6716](https://github.com/gastownhall/beads/issues/6716)). The
+  proxied-server route and the remaining store routes are covered by the
+  entry above.
 
 
 - **`bd list --watch --format` is refused instead of silently dropping the
