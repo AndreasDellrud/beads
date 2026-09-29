@@ -46,12 +46,14 @@ Current PR-related workflow names:
   PRs, or `skip` while the `RBE_WEST_WORKERS` repo variable is unset) and
   exports it as the `rbe-mode` / `rbe-enabled` outputs; every lane exports its
   `job.status` as an output named after the job. `pr.yml`'s gate requires the
-  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED` and
-  `BAZEL_DOLTSERVER`. The legacy jobs these mirror stay required in `pr.yml`
+  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
+  `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`. The legacy jobs these mirror stay required in `pr.yml`
   and `pr-risk.yml`.
   `.github/scripts/bazel-gate.sh` reads the exported mode, never the variable
   or the fork flag: mode `skip` allows every Bazel id to skip, mode `local`
-  allows only the remote-only `BAZEL_EMBEDDED`, and mode `remote` allows none.
+  allows only the remote-only `BAZEL_EMBEDDED`, `BAZEL_PROXIED` and
+  `BAZEL_SERVER_STORAGE` (fork and Dependabot PRs rely on `pr-risk.yml`'s
+  legacy tiers for those), and mode `remote` allows none.
   A lane that should run and fails, is cancelled, or reports no result fails
   the gate, and so does a missing or invalid mode.
   `bazel-integration` is not part of the PR call (`pr.yml` passes

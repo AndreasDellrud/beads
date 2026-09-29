@@ -10,8 +10,9 @@
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
 # requires the call's aggregate result (BAZEL) and bazel-test, bazel-pure,
-# bazel-embedded and bazel-doltserver (BAZEL_TEST, BAZEL_PURE, BAZEL_EMBEDDED,
-# BAZEL_DOLTSERVER); .github/scripts/bazel-gate.sh turns the rbe job's
+# bazel-embedded, bazel-doltserver, bazel-proxied and bazel-server-storage
+# (BAZEL_TEST, BAZEL_PURE, BAZEL_EMBEDDED, BAZEL_DOLTSERVER, BAZEL_PROXIED,
+# BAZEL_SERVER_STORAGE); .github/scripts/bazel-gate.sh turns the rbe job's
 # rbe-mode output into the skips it accepts, so a lane skipped by its `if:`
 # below passes and one that should have run and failed, was cancelled or
 # reported nothing fails the gate. bazel-integration is not part of the PR
@@ -165,6 +166,12 @@ on:
       bazel-doltserver:
         description: "bazel-doltserver's job.status"
         value: ${{ jobs.bazel-doltserver.outputs.result }}
+      bazel-proxied:
+        description: "bazel-proxied's job.status"
+        value: ${{ jobs.bazel-proxied.outputs.result }}
+      bazel-server-storage:
+        description: "bazel-server-storage's job.status"
+        value: ${{ jobs.bazel-server-storage.outputs.result }}
 
 # Main runs always finish (they may save the runner cache); PR runs (called
 # from pr.yml, whose own group cancels the calling run too) supersede. The
@@ -808,10 +815,10 @@ jobs:
   # shared with bazel-doltserver through the remote cache. PR Risk builds
   # its bd-cmd-test with -race, as here; main.yml's test-proxied-cmd twin
   # uses build-artifacts' non-race bd-cmd-test, so this lane is the stricter
-  # of the two. A job of its own, not gated by any integration switch, so a
-  # caller's gate can decide on it separately.
+  # of the two. A job of its own, not gated by any integration switch: it
+  # runs in pr.yml's call and its gate requires it (BAZEL_PROXIED).
   bazel-proxied:
-    name: Bazel / proxied-server tier (advisory)
+    name: proxied-server tier
     # Remote execution only, like bazel-embedded: 15 shards of ~5-10
     # minutes, each with a dolt sql-server busy on ~4 cores, do not fit a
     # GitHub-hosted runner.
@@ -819,6 +826,8 @@ jobs:
     runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 30
+    outputs:
+      result: ${{ steps.result.outputs.result }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -863,6 +872,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
   # pr-risk.yml's server-Dolt storage tier, "Test (Server Dolt Conformance)"
   # and "Test (Server Dolt Full Suite N/16)", as --config=doltserver-integration:
   # the conformance and 16-shard full-suite variants of
@@ -871,15 +890,18 @@ jobs:
   # exactly --config=integration's build flags, so it compiles nothing
   # bazel-integration does not (shared through the remote cache). A job of
   # its own, not gated by any integration switch: this is a PR-time tier,
-  # unlike main.yml's integration jobs.
+  # unlike main.yml's integration jobs, and pr.yml's gate requires it
+  # (BAZEL_SERVER_STORAGE).
   bazel-server-storage:
-    name: Bazel / server-Dolt storage tier (advisory)
+    name: server-Dolt storage tier
     # Remote execution only, like bazel-integration: locally the tagged race
     # build of //... alone is most of the timeout.
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 30
+    outputs:
+      result: ${{ steps.result.outputs.result }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -923,3 +945,13 @@ jobs:
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"

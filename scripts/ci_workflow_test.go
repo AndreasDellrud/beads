@@ -1522,6 +1522,10 @@ var bazelLaneGateIDs = map[string]string{
 	bazelPureJobName:  "BAZEL_PURE",
 	bazelEmbedJobName: "BAZEL_EMBEDDED",
 	bazelDoltJobName:  "BAZEL_DOLTSERVER",
+	// Remote-only PR Risk tiers (fork and Dependabot PRs rely on
+	// pr-risk.yml's legacy jobs, like the embedded tier's).
+	bazelProxiedJobName: "BAZEL_PROXIED",
+	bazelServerJobName:  "BAZEL_SERVER_STORAGE",
 }
 
 var bazelAdvisoryLanes = map[string]string{
@@ -3033,7 +3037,8 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 	}
 
 	// Each tier is a remote-only job of its own (the job if is pinned by
-	// TestBazelWorkflowIsAdvisory via bazelRemoteOnlyJobs): not a step of
+	// TestBazelWorkflowJobsAndExecutionMode via bazelRemoteOnlyJobs, and
+	// pr.yml's gate requires it: bazelLaneGateIDs): not a step of
 	// bazel-doltserver (which also runs locally, and whose job a gate may
 	// require) or of bazel-integration (which a caller may switch off,
 	// although the server tier is a PR-time tier).
@@ -3047,8 +3052,8 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 			t.Errorf("%s timeout-minutes = %d; it runs remotely only (longest shard ~2-8 min), keep it at most 30", c.job, job.TimeoutMinutes)
 		}
 		assertBazelTierStep(t, job, c.job, c.config)
-		if n := len(job.Steps); n != 5 {
-			t.Errorf("%s has %d steps, want checkout, setup-bazel, the tier, check_testcases.py, log upload", c.job, n)
+		if n := len(job.Steps); n != 6 {
+			t.Errorf("%s has %d steps, want checkout, setup-bazel, the tier, check_testcases.py, log upload, result recorder", c.job, n)
 		}
 		logs := job.step(t, "Upload test logs")
 		if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != c.logs || !strings.HasPrefix(logs.Uses, "actions/upload-artifact@") {
