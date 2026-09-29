@@ -22,9 +22,6 @@ import (
 // place, so neither wrote C, and without a post-commit recheck C stays
 // is_blocked=1 and hidden from ready work on every committed snapshot.
 func TestProxiedBlockedRecheckAfterRacingUnblocks(t *testing.T) {
-	if testing.Short() {
-		t.Skip("starts a proxied Dolt server; skipped in -short")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	const prefix = "rbr"
