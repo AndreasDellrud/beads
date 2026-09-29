@@ -896,20 +896,19 @@ var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
 // Instruments are registered against the global delegating provider at init time,
 // so they automatically forward to the real provider once telemetry.Init() runs.
 var doltMetrics struct {
-	retryCount            metric.Int64Counter
-	lockWaitMs            metric.Float64Histogram
-	circuitTrips          metric.Int64Counter
-	circuitRejected       metric.Int64Counter
-	serializationErrors   metric.Int64Counter
-	writeRetries          metric.Int64Counter
-	postTxCommitDropped   metric.Int64Counter
-	blockedRecheckDropped metric.Int64Counter
-	connAcquireMs         metric.Float64Histogram
-	poolWaitCount         metric.Int64Counter
-	poolWaitMs            metric.Float64Histogram
-	claimVerifyLost       metric.Int64Counter
-	claimVerifyRecovered  metric.Int64Counter
-	ignoredTxFreshPool    metric.Int64Counter
+	retryCount           metric.Int64Counter
+	lockWaitMs           metric.Float64Histogram
+	circuitTrips         metric.Int64Counter
+	circuitRejected      metric.Int64Counter
+	serializationErrors  metric.Int64Counter
+	writeRetries         metric.Int64Counter
+	postTxCommitDropped  metric.Int64Counter
+	connAcquireMs        metric.Float64Histogram
+	poolWaitCount        metric.Int64Counter
+	poolWaitMs           metric.Float64Histogram
+	claimVerifyLost      metric.Int64Counter
+	claimVerifyRecovered metric.Int64Counter
+	ignoredTxFreshPool   metric.Int64Counter
 }
 
 func init() {
@@ -941,10 +940,6 @@ func init() {
 	doltMetrics.postTxCommitDropped, _ = m.Int64Counter("bd.db.post_tx_commit_dropped",
 		metric.WithDescription("Post-tx dolt commits abandoned after retries; the data landed but no dolt commit was minted (change rides the next commit on the branch)"),
 		metric.WithUnit("{commit}"),
-	)
-	doltMetrics.blockedRecheckDropped, _ = m.Int64Counter("bd.db.blocked_recheck_dropped",
-		metric.WithDescription("Post-commit blocked-state rechecks abandoned; the write landed but dependents may carry a stale is_blocked flag until `bd recompute-blocked`"),
-		metric.WithUnit("{recheck}"),
 	)
 	doltMetrics.connAcquireMs, _ = m.Float64Histogram("bd.db.conn_acquire_ms",
 		metric.WithDescription("Time to acquire a pooled connection for a Dolt transaction"),
@@ -1366,8 +1361,7 @@ func logBlockedRecheckFailure(ctx context.Context, pending issueops.BlockedReche
 	if err == nil {
 		return
 	}
-	doltMetrics.blockedRecheckDropped.Add(ctx, 1)
-	log.Printf("warning: %s", issueops.BlockedRecheckFailureMessage(pending, err))
+	issueops.ReportBlockedRecheckFailure(ctx, pending, err)
 }
 
 // SetEventsJournalEnabled activates the journal for this store instance only.

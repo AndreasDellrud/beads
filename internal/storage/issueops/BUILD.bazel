@@ -11,6 +11,7 @@ go_library(
         "blocked_consistency.go",
         "blocked_merge.go",
         "blocked_recheck.go",
+        "blocked_recheck_report.go",
         "blocked_state.go",
         "blocking_annotation.go",
         "bootstrap.go",
@@ -112,6 +113,8 @@ go_library(
         "@com_github_dolthub_go_mysql_server//sql",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_gowebpki_jcs//:jcs",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel_metric//:metric",
     ],
 )
 

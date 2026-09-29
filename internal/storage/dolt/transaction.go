@@ -157,13 +157,13 @@ func (t *doltTransaction) dirtyTableNames() []string {
 
 func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
 	pending, err := s.runDoltTransactionRecording(ctx, commitMsg, fn)
-	if err != nil {
-		return err
-	}
 	// Settled here, after the pinned connection and any borrowed ignored-table
 	// connection have gone back to the pool: the recheck needs one of its own.
+	// pending is non-empty only when the regular SQL commit landed or may have
+	// landed, so this also runs when the Dolt commit after it failed
+	// (ErrCommitIndeterminate): those rows are committed all the same.
 	s.settleBlockedRecheck(ctx, pending)
-	return nil
+	return err
 }
 
 // runDoltTransactionRecording is runDoltTransaction's transaction. Once it has
@@ -282,14 +282,31 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 		return issueops.BlockedRecheck{}, err
 	}
 
-	if err := s.finishDoltTransaction(ctx, conn, tx, commitMsg); err != nil {
+	return s.finishDoltTransactionRecording(ctx, conn, tx, commitMsg)
+}
+
+// finishDoltTransactionRecording is finishDoltTransaction that also hands back
+// the dependents the transaction's unblocking writes recorded, on either of its
+// SQL transactions, for the post-commit blocked-state recheck.
+//
+// They are handed back with the error when the commit is indeterminate
+// (ErrCommitIndeterminate): the regular SQL commit may have landed, or did land
+// and only the Dolt commit or the ignored-table commit after it failed. The
+// rows are then committed without a caller being able to replay the write, so
+// the recheck is the only thing that can settle their dependents; being a full
+// recompute of committed state, it is harmless if the commit did not land.
+// Any other failure means the regular SQL commit was refused and rolled back,
+// and nothing is handed back.
+func (s *DoltStore) finishDoltTransactionRecording(ctx context.Context, conn *sql.Conn, tx *doltTransaction, commitMsg string) (issueops.BlockedRecheck, error) {
+	err := s.finishDoltTransaction(ctx, conn, tx, commitMsg)
+	if err != nil && !errors.Is(err, ErrCommitIndeterminate) {
 		return issueops.BlockedRecheck{}, err
 	}
-	pending := issueops.TakeBlockedRecheck(regularTx)
-	if !journalEnabled {
-		pending = pending.Merge(issueops.TakeBlockedRecheck(ignoredTx))
+	pending := issueops.TakeBlockedRecheck(tx.regularTx)
+	if !tx.journalPinned {
+		pending = pending.Merge(issueops.TakeBlockedRecheck(tx.ignoredTx))
 	}
-	return pending, nil
+	return pending, err
 }
 
 // finishDoltTransaction commits the regular SQL transaction, its associated

@@ -3,7 +3,6 @@ package uow
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/cenkalti/backoff/v4"
 
@@ -23,8 +22,10 @@ import (
 // changed an issues row and version commits are not deferred, a plain COMMIT
 // otherwise. A serialization loss is retried on a new transaction.
 //
-// The write it follows is durable, so a failure is logged, never returned: an
-// error from Commit tells every caller the write did not land. What a failure
+// The write it follows is durable, so a failure is reported through
+// issueops.ReportBlockedRecheckFailure (the counter and warning the store
+// runners use), never returned: an error from Commit tells every caller the
+// write did not land. What a failure
 // leaves is the stale flag `bd doctor` and `bd recompute-blocked` repair. It
 // reports whether the session is clean enough to go back to the pool; false
 // means a transaction may still be open on it and it must be poisoned.
@@ -52,8 +53,7 @@ func (t *doltServerTx) recheckBlockedAfterCommit(ctx context.Context, pending is
 		return backoff.Permanent(err)
 	}, backoff.WithContext(bo, ctx))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %s\n",
-			issueops.BlockedRecheckFailureMessage(pending, issueops.BlockedRecheckFailed(err)))
+		issueops.ReportBlockedRecheckFailure(ctx, pending, issueops.BlockedRecheckFailed(err))
 	}
 	return clean
 }
