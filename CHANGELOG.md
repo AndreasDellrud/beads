@@ -9,17 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`bd show --watch` works under `--proxied-server`.** It was refused with
-  `proxy.watch.unsupported` although the provider can answer the poll the way
-  `bd list --watch` already does, so every proxied workspace — the default
-  transport for managed-local setups — had no way to watch a bead. The proxied
-  route now shares the direct route's loop: render once, re-read every 2s,
-  redraw only when the issue's status or `updated_at` changes, stop cleanly on
-  Ctrl+C/SIGTERM, and require exactly one id. Each poll opens its own short
-  unit of work, so a long watch never pins a transaction, and a poll that
-  fails (the issue was deleted, the backend blipped) keeps the last render
-  without printing, as on the direct route. On both routes a watch whose id
-  cannot be found now exits non-zero instead of 0.
+- **`bd sql` no longer drops the rows of CTE queries or CALL result sets**
+  ([#6932](https://github.com/gastownhall/beads/pull/6932)). In proxied-server
+  mode, `WITH name(cols) AS (...) SELECT ...` and `WITH RECURSIVE ...` queries
+  were misread as writes and printed `OK, 0 rows affected` with no error; they
+  now return their rows. Statements are now classified with the Dolt SQL
+  parser (shared by the proxied and direct paths): reads return rows, plain
+  writes (including CTE-prefixed `UPDATE`/`DELETE`) commit and report
+  `rows_affected`, and anything that may both write and return rows (`CALL`,
+  `EXPLAIN ANALYZE` of a write, `RETURNING`) or that the parser cannot
+  classify is committed and prints whatever rows it returns, so
+  `CALL DOLT_BRANCH(...)`-style result sets are rendered instead of discarded.
+  Visible changes for scripts: in direct server mode a multi-statement write,
+  or a single write statement the parser cannot classify, now prints `OK` /
+  `{"status":"ok"}` (as proxied mode already did) instead of
+  `OK, N rows affected` / `{"rows_affected":N}`; and `--readonly` now refuses
+  statements it cannot parse (for example `PRAGMA`) instead of treating them
+  as reads.
 
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
@@ -60,6 +66,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory's. That makes the probe agree with the store actually being backed
   up, but it can flip auto-backup on or off for `-C` invocations whose launch
   directory and target differ in remote configuration.
+
+- **`bd show --watch` works under `--proxied-server`.** It was refused with
+  `proxy.watch.unsupported` although the provider can answer the poll the way
+  `bd list --watch` already does, so every proxied workspace — the default
+  transport for managed-local setups — had no way to watch a bead. The proxied
+  route now shares the direct route's loop: render once, re-read every 2s,
+  redraw only when the issue's status or `updated_at` changes, stop cleanly on
+  Ctrl+C/SIGTERM, and require exactly one id. Each poll opens its own short
+  unit of work, so a long watch never pins a transaction, and a poll that
+  fails (the issue was deleted, the backend blipped) keeps the last render
+  without printing, as on the direct route. On both routes a watch whose id
+  cannot be found now exits non-zero instead of 0.
 
 - **Generated git hooks accept uutils coreutils `timeout` as a deadline helper**
   ([#5541](https://github.com/gastownhall/beads/issues/5541)). The managed hook
@@ -108,8 +126,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach the database another way still need the `bd doctor` /
   `bd recompute-blocked` repair they needed before: `bd batch` (on both its
   plain and its proxied transaction), `bd cook`, `bd mol squash`,
-  `bd mol burn`, `bd duplicates --merge`, and the wisp writes — closes,
-  updates, deletes and demote-to-wisp.
+  `bd mol burn`, `bd duplicates --merge`, the wisp writes — closes, updates,
+  deletes and demote-to-wisp — and every write served through the
+  proxied-server (uow/domain-db) route, which under `--proxied-server` is the
+  ordinary single verbs as well: `bd close`, `bd update`, `bd delete` and
+  `bd dep remove`.
 
 
 - **`bd list --watch --format` is refused instead of silently dropping the
@@ -390,6 +411,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the existing message.
 
 ### Changed
+
+- **`bd prime` describes the memory split instead of prohibiting `MEMORY.md`**
+  ([#6111](https://github.com/gastownhall/beads/pull/6111), refs
+  [#5169](https://github.com/gastownhall/beads/issues/5169)). The guidance
+  line used to read `Do NOT use MEMORY.md files — they fragment across
+  accounts`. That warning predates harnesses that ship a first-party,
+  machine-local memory whose index file is also named `MEMORY.md`, so in a
+  workspace running both, prime told the agent every session not to use a file
+  the harness was actively maintaining. The line now says what each store is
+  for: durable **project** facts go in `bd remember`, because per-tool memory
+  files fragment across accounts; per-operator preferences stay in the
+  harness's own memory. Output text only, no behaviour change. The same
+  sentence is updated in its sibling renderings — the MCP/minimal context, the
+  generated AGENTS.md sections for the minimal and Codex harness templates,
+  and the README snippet — so `bd init` and copy-paste do not re-introduce the
+  prohibition.
 
 - **`bd purge` keeps closed beads a live bead depends on.** A closed bead
   that a not-done bead depends on through `parent-child`, `tracks` or
