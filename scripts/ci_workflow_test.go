@@ -1470,6 +1470,7 @@ const (
 	bazelDoltJobName    = "bazel-doltserver"
 	bazelEmbedJobName   = "bazel-embedded"
 	bazelRBEJobName     = "rbe"
+	bazelIntegJobName   = "bazel-integration"
 	setupBazelActionDir = ".github/actions/setup-bazel"
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
@@ -1485,11 +1486,11 @@ const (
 
 // bazel.yml's jobs: the rbe job that decides the execution mode, the
 // --config=ci lane, and one job per CI job a Bazel config mirrors.
-var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelPureJobName, bazelJobName, bazelRBEJobName}
+var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelPureJobName, bazelJobName, bazelRBEJobName}
 
 // The lanes that only run remotely (skipped unless the rbe job chose remote);
 // every other lane also runs locally.
-var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true}
+var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true, bazelIntegJobName: true}
 
 // The rbe job's decision step reads exactly one secret, and only to test it
 // for emptiness: its env value is a boolean, not the secret.
@@ -1999,6 +2000,58 @@ func bazelRuleBlock(build, name string) string {
 		return build[start:]
 	}
 	return build[start : i+end+3]
+}
+
+// bazel-integration mirrors main.yml's integration jobs with the unmodified
+// --config=integration (whose .bazelrc filter and flags
+// TestBazelrcIntegrationLane pins): no extra filter, selector or remote
+// config on the command line, a BEP for the test-count check, and no
+// equivalence step. ci and integration share bazel-testlogs (review F3), so
+// neither the integration lane in bazel-test nor --config=ci here.
+func TestBazelIntegrationJob(t *testing.T) {
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	job := workflow.job(t, bazelIntegJobName)
+	if job.TimeoutMinutes > 45 {
+		t.Errorf("%s timeout-minutes = %d; it runs remotely only, keep it near the step's 30", bazelIntegJobName, job.TimeoutMinutes)
+	}
+	test := job.step(t, "bazel test //... --config=integration")
+	if test.TimeoutMinutes == 0 || test.TimeoutMinutes >= job.TimeoutMinutes {
+		t.Errorf("%s test step timeout-minutes = %d, want set and below the job's %d", bazelIntegJobName, test.TimeoutMinutes, job.TimeoutMinutes)
+	}
+	cmd := regexp.MustCompile(`\s*\\\n\s*`).ReplaceAllString(test.Run, " ")
+	const wantCmd = `bazel test //... --config=integration --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?`
+	if !strings.Contains(cmd, wantCmd) || !strings.Contains(test.Run, "set -o pipefail") {
+		t.Errorf("%s test step does not run exactly %q:\n%s", bazelIntegJobName, wantCmd, test.Run)
+	}
+	if n := strings.Count(test.Run, "bazel test //"); n != 1 {
+		t.Errorf("%s test step runs bazel test %d times, want 1", bazelIntegJobName, n)
+	}
+	assertTestStepKeepsExitStatus(t, test)
+	count := job.step(t, "Every target and shard ran tests")
+	const wantCount = `python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --not-go //tools/bazel:dolt_version_test`
+	if strings.TrimSpace(count.Run) != wantCount ||
+		count.If != "${{ always() && steps.test.outcome != 'skipped' }}" ||
+		(count.ContinueOnError != nil && count.ContinueOnError != false) {
+		t.Errorf("test-count step: if=%q continue-on-error=%v run=%q; want run %q", count.If, count.ContinueOnError, count.Run, wantCount)
+	}
+	logs := job.step(t, "Upload test logs")
+	if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != "bazel-integration-testlogs" {
+		t.Errorf("test-log upload: if=%q name=%q", logs.If, logs.With["name"])
+	}
+	for name, j := range workflow.Jobs {
+		for _, step := range j.Steps {
+			integ := strings.Contains(step.Run, "--config=integration")
+			if name == bazelIntegJobName && (strings.Contains(step.Run, "--config=ci") || strings.Contains(step.Run, "equivalence.py")) {
+				t.Errorf("%s step %q runs the ci lane or equivalence.py; they would read each other's bazel-testlogs", name, step.Name)
+			}
+			if name != bazelIntegJobName && integ {
+				t.Errorf("%s step %q runs --config=integration; only %s may (shared bazel-testlogs)", name, step.Name, bazelIntegJobName)
+			}
+		}
+	}
+	if err := checkBazelrcIntegrationLane(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc")); err != nil {
+		t.Error(err)
+	}
 }
 
 // bazel-embedded replaces pr-risk.yml's embedded-Dolt tier: --config=embedded

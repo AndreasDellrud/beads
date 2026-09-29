@@ -1,7 +1,8 @@
 # Bazel side-by-side lane (advisory). Runs `bazel test //... --config=ci`, the
 # PR Core-parity selection (race, -short, dolt skip, -requires-docker), on the
 # same commit as pr.yml's go test lanes, plus one job per mirrored CI job
-# (pure-Go/js-wasm, docker lane, pr-risk.yml's embedded-Dolt tier). It is NOT
+# (pure-Go/js-wasm, docker lane, pr-risk.yml's embedded-Dolt tier, main.yml's
+# integration jobs). It is NOT
 # in ci-gate's CI_GATE_REQUIRED; promotion needs the equivalence record
 # described in tools/bazel/equivalence.py and a human decision.
 #
@@ -16,7 +17,8 @@
 #   local: fork PRs, rbe=off dispatches, and same-repo runs without the
 #     secret (Dependabot PRs: same-repo, but no Actions secrets): local
 #     execution on ubuntu-latest, slower but the same results, for every job
-#     but the remote-only one (bazel-embedded), which is skipped.
+#     but the remote-only ones (bazel-embedded, bazel-integration), which
+#     are skipped.
 #   skip: same-repo runs while RBE_WEST_WORKERS is unset (the farm switch).
 # workflow_dispatch with rbe=off simulates a fork run. The decision is also a
 # workflow_call output, so a caller's gate can tell an expected skip from a
@@ -545,6 +547,73 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: bazel-embedded-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # main.yml's "Main Linux integration packages (N/6)" and "Main Linux
+  # integration cmd/bd (N/8)" jobs (nightly.yml's Full Test Suite runs the
+  # same go test in one job) as --config=integration: every package with
+  # -tags=integration,gms_pure_go, race, no -short, BEADS_TEST_SKIP=dolt (see
+  # .bazelrc). A job of its own: ci and integration share bazel-testlogs, so
+  # bazel-test's equivalence step would read this lane's test.xml if both ran
+  # in one job, and the tagged race build is a second full compile.
+  # No equivalence step: equivalence.py's default mode is the --config=ci
+  # selection (go list without the integration tag, -short, ^TestEmbedded
+  # skipped), and its job mode needs the integration jobs' go test -json,
+  # which no run here has. check_testcases.py still catches a target or
+  # shard that ran no tests.
+  bazel-integration:
+    name: Bazel / integration (advisory)
+    # Remote execution only, like bazel-embedded: locally the tagged race
+    # build of //... plus 14 jobs' worth of tests on one runner is well over
+    # the timeout, for tests main.yml's integration jobs already run.
+    needs: rbe
+    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ needs.rbe.outputs.enabled == 'true' }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Bazel
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+
+      # Remote: a cold compile plus the longest test action (1200s cap, see
+      # .bazelrc) fits well inside 30 minutes.
+      - name: bazel test //... --config=integration
+        id: test
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          bazel test //... --config=integration \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=integration: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      # As in bazel-embedded. dolt_version_test is a plain sh_test (no Go
+      # testcases in its test.xml), which --config=integration's tag filter
+      # keeps, unlike the embedded one.
+      - name: Every target and shard ran tests
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --not-go //tools/bazel:dolt_version_test
+
+      - name: Upload test logs
+        if: ${{ failure() && steps.test.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bazel-integration-testlogs
           path: |
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
