@@ -66,6 +66,10 @@ func TestLegacyUpgradeGuardAdmitsServerWorkspaceWithEmptyDoltRoot(t *testing.T) 
 		{name: "metadata.json external server", metadata: externalServerMetadata},
 		{name: "metadata.json server", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
 		{name: "config.yaml server mode", configYaml: configYamlServerMode},
+		// Proxied-server does not select server mode, so it never reaches the
+		// empty-root branch; it is admitted by the final non-embedded arm. Pin
+		// that so a later change to either arm cannot start refusing it.
+		{name: "metadata.json proxied server", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
