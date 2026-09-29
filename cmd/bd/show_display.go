@@ -23,12 +23,13 @@ func singleIssueSnapshot(issue *types.Issue) string {
 // issueWatchSource is what a `bd show --watch` loop reads from. render draws
 // the full view and returns the issue it drew, or nil when there was nothing to
 // draw (it reports why itself); fetch re-reads the issue for the change check
-// and returns nil on any failure, which the loop treats as "no change yet".
+// and must not print anything, since the loop owns what a failed poll means.
 // The direct store and the proxied-server provider each supply one, so both
-// routes share the snapshot and redraw rules below instead of copying them.
+// routes share the snapshot, redraw and poll-failure rules below instead of
+// copying them.
 type issueWatchSource struct {
 	render func(ctx context.Context) *types.Issue
-	fetch  func(ctx context.Context) *types.Issue
+	fetch  func(ctx context.Context) (*types.Issue, error)
 }
 
 // showWatchPollInterval is how often a watched issue is re-read.
@@ -40,7 +41,7 @@ const showWatchPollInterval = 2 * time.Second
 func watchIssue(ctx context.Context, issueID string) error {
 	return runIssueWatch(ctx, issueWatchSource{
 		render: func(ctx context.Context) *types.Issue { return displayShowIssueReturn(ctx, issueID) },
-		fetch:  func(ctx context.Context) *types.Issue { return fetchIssue(ctx, issueID) },
+		fetch:  func(ctx context.Context) (*types.Issue, error) { return fetchIssue(ctx, issueID) },
 	})
 }
 
@@ -63,9 +64,13 @@ func runIssueWatch(ctx context.Context, src issueWatchSource) error {
 }
 
 // watchIssueLoop renders the issue once, then on every tick re-reads it and
-// redraws only when singleIssueSnapshot changes. It returns when stop fires,
-// or immediately, reporting false, when the initial render found nothing to
-// watch.
+// redraws only when singleIssueSnapshot changes. A poll that fails — the
+// issue was deleted, the backend blipped, a unit of work would not open — keeps
+// the last render on screen and is retried on the next tick without printing:
+// the watch is a live view, and a line (or, under --json, an error object) on
+// every tick for a condition the user can already see would bury it. It
+// returns when stop fires, or immediately, reporting false, when the initial
+// render found nothing to watch.
 func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.Time, stop <-chan os.Signal) bool {
 	issue := src.render(ctx)
 	if issue == nil {
@@ -81,8 +86,8 @@ func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.
 			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
 			return true
 		case <-tick:
-			issue := src.fetch(ctx)
-			if issue == nil {
+			issue, err := src.fetch(ctx)
+			if err != nil || issue == nil {
 				continue
 			}
 			snap := singleIssueSnapshot(issue)
@@ -95,16 +100,19 @@ func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.
 	}
 }
 
-// fetchIssue retrieves a single issue by ID, returning nil on error.
-func fetchIssue(ctx context.Context, issueID string) *types.Issue {
+// fetchIssue retrieves a single issue by ID without printing anything.
+func fetchIssue(ctx context.Context, issueID string) (*types.Issue, error) {
 	result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
 	if result != nil {
 		defer result.Close()
 	}
-	if err != nil || result == nil || result.Issue == nil {
-		return nil
+	if err != nil {
+		return nil, err
 	}
-	return result.Issue
+	if result == nil || result.Issue == nil {
+		return nil, fmt.Errorf("issue %s not found", issueID)
+	}
+	return result.Issue, nil
 }
 
 // displayShowIssueReturn displays a single issue and returns it for snapshot use.

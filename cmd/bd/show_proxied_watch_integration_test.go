@@ -139,6 +139,55 @@ func TestProxiedServerShowWatch(t *testing.T) {
 		}
 	})
 
+	// A poll that fails keeps the last render and prints nothing: the route
+	// used to print "Error refreshing <id>" every 2s once the issue was
+	// deleted, and under --json an error object on stdout each time.
+	t.Run("deleted_issue_polls_stay_quiet", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "swd")
+		issue := bdProxiedCreate(t, bd, p.dir, "Watch then delete", "--type", "task")
+
+		// Locked: stdout is read while the child is still writing to it.
+		stdout := &watchBannerWriter{renders: make(chan int, 1)}
+		stderr := &watchBannerWriter{renders: make(chan int, 1)}
+		cmd := exec.Command(bd, "--json", "show", issue.ID, "--watch")
+		cmd.Dir = p.dir
+		cmd.Env = bdProxiedEnv(p.dir)
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start bd show --watch: %v", err)
+		}
+		exited := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(exited)
+		}()
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			<-exited
+		})
+
+		if !stderr.waitForRender(1, 60*time.Second, exited) {
+			t.Fatalf("bd show --watch never started watching\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+		before := len(stdout.String())
+		bdProxiedDelete(t, bd, p.dir, issue.ID, "--force")
+
+		// Several poll intervals, so a per-tick report would have fired.
+		select {
+		case <-exited:
+			t.Fatalf("bd show --watch exited after the issue was deleted\nstderr:\n%s", stderr.String())
+		case <-time.After(3 * showWatchPollInterval):
+		}
+		if after := stdout.String()[before:]; after != "" {
+			t.Errorf("stdout grew after the delete:\n%s", after)
+		}
+		if strings.Contains(stderr.String(), "Error") || strings.Contains(stderr.String(), "not found") {
+			t.Errorf("stderr reported the failed polls:\n%s", stderr.String())
+		}
+	})
+
 	t.Run("missing_id_fails_instead_of_watching", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "swm")

@@ -2,8 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
+	"errors"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -39,18 +38,20 @@ func proxiedIssueWatchSource(in *showProxiedInput) issueWatchSource {
 			proxiedRenderIssue(ctx, uw, issue, isWisp, in, 0, formatTime)
 			return issue
 		},
-		fetch: func(ctx context.Context) *types.Issue {
-			uw, err := proxiedOpenReadUOW(ctx)
+		// Opens its unit of work directly rather than through
+		// proxiedOpenReadUOW, which reports its own failure: a poll must stay
+		// silent and leave the verdict to watchIssueLoop.
+		fetch: func(ctx context.Context) (*types.Issue, error) {
+			if uowProvider == nil {
+				return nil, errors.New("proxied-server UOW provider not initialized")
+			}
+			uw, err := uowProvider.NewUOW(ctx)
 			if err != nil {
-				return nil
+				return nil, err
 			}
 			defer uw.Close(ctx)
 			issue, _, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error refreshing %s: %v\n", id, err)
-				return nil
-			}
-			return issue
+			return issue, err
 		},
 	}
 }

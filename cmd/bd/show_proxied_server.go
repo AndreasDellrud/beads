@@ -522,9 +522,10 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 
 	// A READ on an ALTERNATE view. `bd show`'s detail view is on
 	// issueops.Reader on both routes and gets its labels hydrated there; this
-	// renderer serves --refs, --children, --thread and --as-of, which answer
-	// with shapes the Reader contract does not describe, from a unit of work
-	// the caller already holds and has already read the issue from. Asking the
+	// renderer serves the text views the Reader contract does not describe —
+	// --refs, --children, --thread, --as-of, and every render of --watch
+	// (show_proxied_watch.go) — from a unit of work the caller already holds
+	// and has already read the issue from. Asking the
 	// role here would open a second transaction to re-fetch a row this function
 	// was handed. Alternate views reaching roles of their own is the follow-up
 	// (ga-2ltro.12).

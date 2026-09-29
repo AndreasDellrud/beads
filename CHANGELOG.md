@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route now shares the direct route's loop: render once, re-read every 2s,
   redraw only when the issue's status or `updated_at` changes, stop cleanly on
   Ctrl+C/SIGTERM, and require exactly one id. Each poll opens its own short
-  unit of work, so a long watch never pins a transaction. On both routes a
-  watch whose id cannot be found now exits non-zero instead of 0.
+  unit of work, so a long watch never pins a transaction, and a poll that
+  fails (the issue was deleted, the backend blipped) keeps the last render
+  without printing, as on the direct route. On both routes a watch whose id
+  cannot be found now exits non-zero instead of 0.
 
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
