@@ -1868,8 +1868,16 @@ var (
 	doltServerExtraEnv = map[string][]string{
 		"fix_dolt_test":      {`"BEADS_FIX_REQUIRE_DOLT": "1"`},
 		"protocol_dolt_test": {`"BEADS_PROTOCOL_REQUIRE_DOLT": "1"`},
+		// Without it every proxied test self-skips (the jobs' step env).
+		"bd_proxied_test": {`"BEADS_TEST_PROXIED_SERVER": "1"`},
+		// federation_test.go fails instead of skipping without a server.
+		"dolt_server_full_test": {`"BEADS_TEST_ENV_RUN_DOLT": "1"`},
 	}
-	bazelRuleNameRe = regexp.MustCompile(`(?m)^\s*name\s*=\s*"([^"]+)"`)
+	// doltServerLaneTags are the tags of the lanes whose targets start
+	// hermetic dolt sql-servers; checkDoltServerRules holds each of them to
+	// the same rules.
+	doltServerLaneTags = []string{"dolt-server", "dolt-server-proxied", "dolt-server-integration"}
+	bazelRuleNameRe    = regexp.MustCompile(`(?m)^\s*name\s*=\s*"([^"]+)"`)
 )
 
 // bazelTopRules splits a BUILD file into its top-level calls: each starts at
@@ -1893,14 +1901,26 @@ func bazelTopRules(build string) []string {
 	return rules
 }
 
-// checkDoltServerRules checks each rule tagged dolt-server in one package's
-// BUILD file on its own (a file-wide search would accept another target's
-// env), and that the package has at least one.
+// doltServerRuleTag returns the dolt-server lane tag a rule carries, or "".
+func doltServerRuleTag(rule string) string {
+	for _, tag := range doltServerLaneTags {
+		if strings.Contains(rule, `"`+tag+`"`) {
+			return tag
+		}
+	}
+	return ""
+}
+
+// checkDoltServerRules checks each rule tagged for a dolt-server lane
+// (doltServerLaneTags) in one package's BUILD file on its own (a file-wide
+// search would accept another target's env), and that the package has at
+// least one.
 func checkDoltServerRules(pkg, build string) []error {
 	var errs []error
 	found := 0
 	for _, rule := range bazelTopRules(stripStarlarkComments(build)) {
-		if !strings.Contains(rule, `"dolt-server"`) {
+		tag := doltServerRuleTag(rule)
+		if tag == "" {
 			continue
 		}
 		found++
@@ -1908,14 +1928,14 @@ func checkDoltServerRules(pkg, build string) []error {
 		if m := bazelRuleNameRe.FindStringSubmatch(rule); m != nil {
 			name = m[1]
 		}
-		where := "//" + pkg + ":" + name
+		where := "//" + pkg + ":" + name + " (" + tag + ")"
 		for _, env := range append(append([]string{}, doltServerRuleEnv...), doltServerExtraEnv[name]...) {
 			if !strings.Contains(rule, env) {
-				errs = append(errs, errors.New(where+" (dolt-server) lacks rule env "+env))
+				errs = append(errs, errors.New(where+" lacks rule env "+env))
 			}
 		}
 		if strings.Contains(rule, `"no-remote-exec"`) {
-			errs = append(errs, errors.New(where+" (dolt-server) is tagged no-remote-exec; the lane runs on remote workers"))
+			errs = append(errs, errors.New(where+" is tagged no-remote-exec; the lane runs on remote workers"))
 		}
 	}
 	if found == 0 {
@@ -1960,6 +1980,13 @@ sh_test(
 		"no target":       docker,
 		"fix switch":      strings.Replace(good, `"uow_dolt_test"`, `"fix_dolt_test"`, 1),
 		"protocol switch": strings.Replace(good, `"uow_dolt_test"`, `"protocol_dolt_test"`, 1),
+		"proxied switch": strings.Replace(strings.Replace(good, `"uow_dolt_test"`, `"bd_proxied_test"`, 1),
+			`tags = ["dolt-server"]`, `tags = ["dolt-server-proxied"]`, 1),
+		"run-dolt switch": strings.Replace(strings.Replace(good, `"uow_dolt_test"`, `"dolt_server_full_test"`, 1),
+			`tags = ["dolt-server"]`, `tags = ["dolt-server-integration"]`, 1),
+		"proxied container": strings.Replace(strings.Replace(good, `"local"`, `"container"`, 1),
+			`tags = ["dolt-server"]`, `tags = ["dolt-server-proxied"]`, 1),
+		"integration no-remote-exec": strings.Replace(good, `tags = ["dolt-server"]`, `tags = ["dolt-server-integration", "no-remote-exec"]`, 1),
 	} {
 		if bad == good {
 			t.Fatalf("%s: mutation did not apply", name)
@@ -2011,8 +2038,8 @@ func bazelRuleBlock(build, name string) string {
 func TestBazelIntegrationJob(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	job := workflow.job(t, bazelIntegJobName)
-	if job.TimeoutMinutes > 45 {
-		t.Errorf("%s timeout-minutes = %d; it runs remotely only, keep it near the step's 30", bazelIntegJobName, job.TimeoutMinutes)
+	if job.TimeoutMinutes > 60 {
+		t.Errorf("%s timeout-minutes = %d; it runs remotely only, keep it near its steps' 30 + 25", bazelIntegJobName, job.TimeoutMinutes)
 	}
 	test := job.step(t, "bazel test //... --config=integration")
 	if test.TimeoutMinutes == 0 || test.TimeoutMinutes >= job.TimeoutMinutes {
@@ -2035,7 +2062,7 @@ func TestBazelIntegrationJob(t *testing.T) {
 		t.Errorf("test-count step: if=%q continue-on-error=%v run=%q; want run %q", count.If, count.ContinueOnError, count.Run, wantCount)
 	}
 	logs := job.step(t, "Upload test logs")
-	if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != "bazel-integration-testlogs" {
+	if logs.If != "${{ failure() && (steps.test.outcome != 'skipped' || steps.server-storage.outcome != 'skipped') }}" || logs.With["name"] != "bazel-integration-testlogs" {
 		t.Errorf("test-log upload: if=%q name=%q", logs.If, logs.With["name"])
 	}
 	for name, j := range workflow.Jobs {
@@ -2051,6 +2078,230 @@ func TestBazelIntegrationJob(t *testing.T) {
 	}
 	if err := checkBazelrcIntegrationLane(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc")); err != nil {
 		t.Error(err)
+	}
+}
+
+// bazelrcLines returns .bazelrc's trimmed lines as a set.
+func bazelrcLines(t *testing.T) map[string]bool {
+	t.Helper()
+	lines := map[string]bool{}
+	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
+		lines[strings.TrimSpace(line)] = true
+	}
+	return lines
+}
+
+// assertBazelTierStep checks a remote-only tier step of a bazel.yml job: it
+// runs exactly `bazel test //... --config=<config>` with its own BEP, keeps
+// bazel's exit status, runs even when an earlier test step failed, and is
+// followed by check_testcases.py on that BEP.
+func assertBazelTierStep(t *testing.T, job ciWorkflowJob, jobName, config, id, bep, wantIf string) {
+	t.Helper()
+	step := job.step(t, "bazel test //... --config="+config)
+	if step.ID != id || step.If != wantIf || step.TimeoutMinutes == 0 || step.TimeoutMinutes >= job.TimeoutMinutes {
+		t.Errorf("%s step --config=%s: id=%q if=%q timeout-minutes=%d; want id %q, if %q, a timeout below the job's %d",
+			jobName, config, step.ID, step.If, step.TimeoutMinutes, id, wantIf, job.TimeoutMinutes)
+	}
+	cmd := regexp.MustCompile(`\s*\\\n\s*`).ReplaceAllString(step.Run, " ")
+	wantCmd := `bazel test //... --config=` + config + ` --build_event_json_file="$RUNNER_TEMP/` + bep + `"`
+	if !strings.Contains(cmd, wantCmd) || !strings.Contains(step.Run, "set -o pipefail") || strings.Count(step.Run, "bazel test //") != 1 ||
+		strings.Contains(step.Run, "--config=remote-exec") || strings.Contains(step.Run, "--test_tag_filters") {
+		t.Errorf("%s step --config=%s does not run exactly %q:\n%s", jobName, config, wantCmd, step.Run)
+	}
+	assertTestStepKeepsExitStatus(t, step)
+	found := false
+	for _, s := range job.Steps {
+		if strings.TrimSpace(s.Run) == `python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/`+bep+`"` {
+			found = true
+			if s.If != "${{ always() && steps."+id+".outcome != 'skipped' }}" || (s.ContinueOnError != nil && s.ContinueOnError != false) {
+				t.Errorf("%s: check_testcases.py for %s: if=%q continue-on-error=%v", jobName, bep, s.If, s.ContinueOnError)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("%s: no check_testcases.py step on %s (a shard or selector that runs no tests exits 0)", jobName, bep)
+	}
+}
+
+// The proxied-server tier (pr-risk.yml and main.yml "Test (Proxied Dolt Cmd
+// N/15)") and the server-Dolt storage tier (pr-risk.yml "Test (Server Dolt
+// Conformance)", "Test (Server Dolt Full Suite N/16)") as Bazel variants:
+// each manifest-sharded variant runs its jobs' shard script with their shard
+// total, the conformance variant the job's exact flags, with the jobs' race
+// setting, subprocess binaries and switches; the lanes' configs keep the
+// jobs' selection, and the storage lane shares --config=integration's build.
+// bazel.yml runs both tiers remotely only.
+func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
+	rc := bazelrcLines(t)
+	for _, want := range []string{
+		"test:doltserver-proxied --@rules_go//go/config:race",
+		"test:doltserver-proxied --test_tag_filters=dolt-server-proxied",
+		"test:doltserver-proxied --test_timeout=-1,-1,-1,1200",
+		"test:doltserver-integration --test_tag_filters=dolt-server-integration",
+		"test:doltserver-integration --test_timeout=-1,-1,-1,1200",
+	} {
+		if !rc[want] {
+			t.Errorf(".bazelrc lacks %q", want)
+		}
+	}
+	var tierTags, integTags map[string]bool
+	for line := range rc {
+		for _, config := range []string{"doltserver-proxied", "doltserver-integration"} {
+			if strings.HasPrefix(line, "test:"+config+" ") && (strings.Contains(line, "-test.short") || strings.Contains(line, "BEADS_TEST_SKIP") ||
+				strings.Contains(line, "-test.run") || strings.Contains(line, "-test.skip") || strings.Contains(line, "--test_filter")) {
+				t.Errorf(".bazelrc %q: the jobs run their scripts' selection, without -short or BEADS_TEST_SKIP", line)
+			}
+		}
+		if v, ok := strings.CutPrefix(line, "build:doltserver-integration --@rules_go//go/config:tags="); ok {
+			tierTags = tagSet(v)
+		}
+		if v, ok := strings.CutPrefix(line, "build:integration --@rules_go//go/config:tags="); ok {
+			integTags = tagSet(v)
+		}
+	}
+	// The same build flags as --config=integration, or the tier compiles the
+	// tagged graph once more.
+	if tierTags == nil || !sameTagSet(tierTags, integTags) {
+		t.Errorf(".bazelrc build:doltserver-integration tags = %v, want build:integration's %v", tierTags, integTags)
+	}
+	if rc["test:integration --@rules_go//go/config:race"] != rc["test:doltserver-integration --@rules_go//go/config:race"] {
+		t.Error(".bazelrc: test:doltserver-integration and test:integration differ in race; they must share their build")
+	}
+
+	risk := readCIWorkflow(t, "pr-risk.yml")
+	build := risk.job(t, "build-embedded")
+	for step, want := range map[string]string{
+		// The proxied jobs' test binary is this race build (--config=
+		// doltserver-proxied's bd_test), their subprocess bd the non-race one
+		// (bd_for_tests).
+		"Build embedded cmd test binary":     "go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/",
+		"Build proxied bd subprocess binary": "go build -tags gms_pure_go -o /tmp/bd-proxied ./cmd/bd/",
+	} {
+		if got := strings.TrimSpace(build.step(t, step).Run); got != want {
+			t.Errorf("pr-risk.yml %q = %q, want %q", step, got, want)
+		}
+	}
+	// The server jobs' binary: integration-tagged (the lane's build tags) and
+	// not race (dolt_race_off).
+	m := regexp.MustCompile(`^go test -tags=(\S+) -c -o /tmp/dolt-conformance-test \./internal/storage/dolt/$`).
+		FindStringSubmatch(strings.TrimSpace(build.step(t, "Build server Dolt conformance test binary").Run))
+	if m == nil || !sameTagSet(tagSet(m[1]), tierTags) {
+		t.Errorf("pr-risk.yml's server Dolt test binary is no longer the non-race `go test -tags=<build:doltserver-integration tags> -c`: %v", m)
+	}
+
+	type shardTier struct {
+		workflow, job, step, script, binVar, pkg, target, env string
+	}
+	tiers := []shardTier{
+		{"pr-risk.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER"},
+		{"main.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER"},
+		{"pr-risk.yml", "test-server-storage-full", "Test", ".github/scripts/server-storage-test-shard.sh", "BEADS_TEST_SERVER_TEST_BINARY", "internal/storage/dolt", "dolt_server_full_test", "BEADS_TEST_ENV_RUN_DOLT"},
+	}
+	for _, c := range tiers {
+		j := readCIWorkflow(t, c.workflow).job(t, c.job)
+		shards := len(j.Strategy.Matrix.Shard)
+		step := j.step(t, c.step)
+		if want := "bash " + c.script + " ${{ matrix.shard }} " + strconv.Itoa(shards); strings.TrimSpace(step.Run) != want {
+			t.Errorf("%s %s runs %q, want %q", c.workflow, c.job, step.Run, want)
+		}
+		if step.Env[c.env] != "1" {
+			t.Errorf("%s %s no longer sets %s=1; update %s:%s", c.workflow, c.job, c.env, c.pkg, c.target)
+		}
+		if os.Getenv("TEST_SRCDIR") != "" {
+			continue // scripts_test's runfiles hold no other package's BUILD
+		}
+		root := sourceRepoRoot(t)
+		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
+		for _, want := range []string{
+			`srcs = ["//tools/bazel:go_test_manifest_shard.sh"],`,
+			`"$(rootpath //:` + c.script + `)",`,
+			`"` + c.binVar + `",`,
+			"shard_count = " + strconv.Itoa(shards) + ",",
+			`timeout = "eternal",`,
+		} {
+			if !strings.Contains(rule, want) {
+				t.Errorf("%s:%s does not contain %q (%s %s):\n%s", c.pkg, c.target, want, c.workflow, c.job, rule)
+			}
+		}
+		mm := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
+		if mm == nil {
+			t.Fatalf("%s has no ${BEADS_TEST_SHARD_MANIFEST:-...} default manifest", c.script)
+		}
+		data := bazelAttrBlock(rule, "data")
+		for _, file := range []string{c.script, mm[1]} {
+			if !strings.Contains(data, `"//:`+file+`",`) {
+				t.Errorf("%s:%s data lacks //:%s (without the manifest every shard falls back to hashing):\n%s", c.pkg, c.target, file, data)
+			}
+		}
+	}
+
+	conf := risk.job(t, "test-server-storage").step(t, "Test").Run
+	quoted := regexp.MustCompile(`(-test\.[a-z]+) '([^']*)'|(-test\.[a-z]+=\S+|-test\.v)`)
+	fields := strings.Fields(conf)
+	if len(fields) == 0 || fields[0] != "/tmp/dolt-conformance-test" {
+		t.Fatalf("pr-risk.yml test-server-storage no longer runs /tmp/dolt-conformance-test: %q", conf)
+	}
+	var wantArgs []string
+	for _, m := range quoted.FindAllStringSubmatch(conf, -1) {
+		if m[1] != "" {
+			wantArgs = append(wantArgs, `"`+m[1]+"="+strings.ReplaceAll(m[2], "$", "$$")+`",`)
+		} else {
+			wantArgs = append(wantArgs, `"`+m[3]+`",`)
+		}
+	}
+	if len(wantArgs) != 4 {
+		t.Fatalf("parsed %v from pr-risk.yml test-server-storage %q", wantArgs, conf)
+	}
+
+	if os.Getenv("TEST_SRCDIR") == "" {
+		root := sourceRepoRoot(t)
+		doltBuild := readPolicyFile(t, root, "internal/storage/dolt/BUILD.bazel")
+		rule := bazelRuleBlock(doltBuild, "dolt_server_conformance_test")
+		for _, w := range append(wantArgs, `"$(rootpath :dolt_race_off)",`, `srcs = ["//tools/bazel:go_test_variant.sh"],`) {
+			if !strings.Contains(bazelAttrBlock(rule, "args")+rule, w) {
+				t.Errorf("dolt:dolt_server_conformance_test does not contain %q (pr-risk.yml test-server-storage):\n%s", w, rule)
+			}
+		}
+		if strings.Contains(rule, "BEADS_TEST_ENV_RUN_DOLT") {
+			t.Error("dolt:dolt_server_conformance_test sets BEADS_TEST_ENV_RUN_DOLT; test-server-storage does not")
+		}
+		if r := bazelRuleBlock(doltBuild, "dolt_race_off"); !strings.Contains(r, "go_test_race_off(") || !strings.Contains(r, `test = ":dolt_test",`) {
+			t.Errorf("dolt:dolt_race_off must be go_test_race_off of :dolt_test (the jobs' binary is not race):\n%s", r)
+		}
+		full := bazelRuleBlock(doltBuild, "dolt_server_full_test")
+		for _, w := range []string{`"$(rootpath :dolt_race_off)",`, `"BEADS_TEST_SUBPROCESS_BINARY": "$(rlocationpath :dolt_race_off)"`, `"//:go.mod",`} {
+			if !strings.Contains(full, w) {
+				t.Errorf("dolt:dolt_server_full_test lacks %q (SubprocessRunner reuses the test binary; ModuleRoot needs go.mod):\n%s", w, full)
+			}
+		}
+		proxied := bazelRuleBlock(readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "bd_proxied_test")
+		for _, w := range []string{`"$(rootpath :bd_test)",`, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)"`} {
+			if !strings.Contains(proxied, w) {
+				t.Errorf("cmd/bd:bd_proxied_test lacks %q (race bd_test, non-race subprocess bd, like the jobs):\n%s", w, proxied)
+			}
+		}
+		for pkg, build := range map[string]string{"cmd/bd": readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "internal/storage/dolt": doltBuild} {
+			for _, err := range checkDoltServerRules(pkg, build) {
+				t.Error(err)
+			}
+		}
+	}
+
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	assertBazelTierStep(t, workflow.job(t, bazelDoltJobName), bazelDoltJobName, "doltserver-proxied", "proxied", "bazel-bep-proxied.json",
+		"${{ !cancelled() && steps.bazel.outcome == 'success' && needs.rbe.outputs.enabled == 'true' }}")
+	assertBazelTierStep(t, workflow.job(t, bazelIntegJobName), bazelIntegJobName, "doltserver-integration", "server-storage", "bazel-bep-server-storage.json",
+		"${{ !cancelled() && steps.bazel.outcome == 'success' }}")
+	if logs := workflow.job(t, bazelDoltJobName).step(t, "Upload test logs"); !strings.Contains(logs.If, "steps.proxied.outcome == 'failure'") {
+		t.Errorf("%s uploads no test logs when the proxied tier fails: if=%q", bazelDoltJobName, logs.If)
+	}
+	for name, j := range workflow.Jobs {
+		for _, step := range j.Steps {
+			if (strings.Contains(step.Run, "--config=doltserver-proxied") && name != bazelDoltJobName) ||
+				(strings.Contains(step.Run, "--config=doltserver-integration") && name != bazelIntegJobName) {
+				t.Errorf("%s step %q runs a dolt-server tier outside its job", name, step.Name)
+			}
+		}
 	}
 }
 
