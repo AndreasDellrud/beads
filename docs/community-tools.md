@@ -18,7 +18,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[beady-eye](https://github.com/CodeForBreakfast/beady-eye)** - Live terminal viewer that follows agents as they work through a tree of beads, redrawing as they claim and finish them. Integrates with [herdr](https://herdr.dev), and watches several projects at once. Read-only. Built by [@GraemeF](https://github.com/GraemeF). (Rust)
 
-- **[btui](https://github.com/AndreasDellrud/beads-tui)** - Read-only terminal browser with active, ready, and closed views, filtering, keyboard and mouse navigation, and issue details with comments and dependency relationships. Launches Codex or Claude Code sessions for selected work, with optional [Herdr](https://herdr.dev) worktree integration. Reads through the installed `bd --readonly` CLI. Built by [@AndreasDellrud](https://github.com/AndreasDellrud). (Rust/Ratatui)
+- **[btui](https://github.com/AndreasDellrud/beads-tui)** - Read-only terminal browser with active, ready, and closed views, filtering, keyboard and mouse navigation, and issue details with comments and dependency relationships. Launches Codex or Claude Code sessions for selected work, with optional [Herdr](https://herdr.dev) worktree integration. Reads through the installed `bd --readonly` CLI. Supports Beads 1.3.0 with optional event-triggered refresh, retaining polling fallback for older versions and unjournaled changes. Built by [@AndreasDellrud](https://github.com/AndreasDellrud). (Rust/Ratatui)
 
 ## Web UIs
 
