@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,4 +106,25 @@ func TestEmbeddedTypesAgreeWithCreate(t *testing.T) {
 	assertTypesAgreeWithCreate(t, func(t *testing.T, args ...string) ([]byte, error) {
 		return bdRunWithFlockRetry(t, bd, dir, args...)
 	}, beadsDir)
+}
+
+// Server mode (`bd init --server` against an external dolt sql-server) lists
+// through DoltStore.GetCustomTypes, the resolver that used to drop
+// config.yaml types once the database had any.
+func TestServerModeTypesAgreeWithCreate(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newServerModeProject(t, bd, "tas")
+	assertTypesAgreeWithCreate(t, func(t *testing.T, args ...string) ([]byte, error) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = p.dir
+		cmd.Env = p.env
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			return append(stdout.Bytes(), stderr.Bytes()...), err
+		}
+		return stdout.Bytes(), nil
+	}, p.beadsDir)
 }
